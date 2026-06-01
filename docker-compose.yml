@@ -1,0 +1,48 @@
+services:
+  citymatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: citymatch:latest
+    container_name: citymatch
+
+    env_file:
+      - .env
+
+    environment:
+      DATABASE_URL: sqlite:///./db/cities.db
+      STREAMLIT_SERVER_PORT: 8501
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      CITYMATCH_COMMUNE_SEUIL: 20000
+      LOAD_DEMO_DATA: 0
+
+    ports:
+      - "8501:8501"
+
+    volumes:
+      # Code monté pour le développement :
+      # les modifications locales sont prises en compte dans le container.
+      - .:/app
+
+      # Données persistantes Docker.
+      - citymatch_db:/app/db
+      - citymatch_cache:/app/data/cache
+      - citymatch_vectorstore:/app/vectorstore
+
+      # Rapports visibles directement sur ta machine locale.
+      - ./reports/output:/app/reports/output
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  citymatch_db:
+  citymatch_cache:
+  citymatch_vectorstore:

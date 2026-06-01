@@ -1,0 +1,154 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# CityMatch — .gitignore
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# ─── Environnements virtuels ─────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ─── Variables d'environnement / secrets ─────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# ─── Base de données locale ──────────────────────────────────────────────────
+db/*.db
+db/*.sqlite
+db/*.sqlite3
+db/*backup*.db
+db/*backup*.sqlite
+db/*backup*.sqlite3
+
+# Garder éventuellement le dossier db avec un .gitkeep
+!db/.gitkeep
+
+# ─── Données générées / cache ingestion ──────────────────────────────────────
+data/cache/
+data/geo/
+data/tmp/
+data/temp/
+*.part
+*.tmp
+
+# Documents méthodologiques : à garder si tu veux versionner le RAG
+!data/docs/
+!data/docs/*.txt
+!data/pdfs/
+!data/pdfs/*.txt
+
+# ─── Vectorstore / ChromaDB ──────────────────────────────────────────────────
+vectorstore/
+chroma/
+*.chroma/
+
+# ─── Rapports générés ────────────────────────────────────────────────────────
+reports/output/
+reports/*.pdf
+reports/*.html
+reports/*.md
+
+# Garder éventuellement le dossier reports avec un .gitkeep
+!reports/.gitkeep
+!reports/output/.gitkeep
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+*.out
+*.err
+
+# ─── Notebooks / Jupyter ─────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─── Tests / cache outils ────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# ─── Streamlit ────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# Garder la config Streamlit si elle existe
+!.streamlit/config.toml
+
+# ─── Docker local ─────────────────────────────────────────────────────────────
+.docker/
+docker-data/
+
+# ─── Fichiers système / IDE ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+.idea/
+
+# ─── Fichiers temporaires éditeurs ───────────────────────────────────────────
+*.swp
+*.swo
+*~
+.~lock.*
+
+# ─── Sauvegardes générées par scripts de patch ───────────────────────────────
+*.bak
+*.bak_*
+*.backup
+*_backup.py
+*.bak_before_*
+
+# ─── Archives locales ────────────────────────────────────────────────────────
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# ─── Fichiers lourds téléchargés manuellement ────────────────────────────────
+*.parquet
+*.gpkg
+*.geojson
+*.shp
+*.dbf
+*.shx
+*.prj
+
+# Exception : ne pas ignorer requirements / docs essentiels
+!requirements.txt
+!README.md
+!Dockerfile
+!docker-compose.yml
+!docker-entrypoint.sh
+!.dockerignore

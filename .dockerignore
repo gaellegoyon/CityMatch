@@ -1,0 +1,35 @@
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environnements locaux
+venv/
+.venv/
+env/
+ENV/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Données locales lourdes / générées
+db/*.db
+db/*.sqlite
+db/*.sqlite3
+data/cache/
+vectorstore/
+reports/output/
+logs/
+
+# Artifacts temporaires
+*.bak
+*.part
+*.tmp
+.DS_Store

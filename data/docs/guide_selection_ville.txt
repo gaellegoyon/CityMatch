@@ -1,0 +1,213 @@
+# Guide de sélection d'une ville pour s'installer — CityMatch
+
+## Objectif
+
+Ce guide présente les critères réellement exploitables par CityMatch pour aider une personne ou un foyer à comparer des villes françaises.
+
+CityMatch privilégie les données :
+- issues de sources publiques reconnues ;
+- disponibles à l'échelle communale quand c'est possible ;
+- comparables entre villes ;
+- suffisamment fiables pour ne pas créer de biais artificiel.
+
+Les critères sans source fiable ou trop incomplets ne sont pas utilisés dans le scoring.
+
+## Principe général
+
+Le choix d'une ville dépend rarement d'un seul indicateur. CityMatch combine plusieurs dimensions :
+
+1. localisation ;
+2. logement ;
+3. sécurité ;
+4. santé ;
+5. services et équipements ;
+6. famille / écoles ;
+7. économie locale ;
+8. connectivité ;
+9. qualité de l'air ;
+10. climat ;
+11. taille de ville.
+
+Chaque critère peut recevoir un poids de 1 à 5 selon son importance pour l'utilisateur.
+
+## Critères pour les familles avec enfants
+
+Les critères utiles sont :
+
+- écoles primaires par enfant ;
+- lycées par adolescent estimé ;
+- crèches par habitant ;
+- sécurité ;
+- prix immobilier ;
+- taille de ville ;
+- proximité d'une grande ville de référence si l'utilisateur le demande.
+
+Exemples de demandes :
+- “famille avec deux enfants, bonnes écoles, proche de Lyon” ;
+- “ville moyenne sécurisée avec écoles et budget raisonnable” ;
+- “pas trop isolé, avec services pour enfants”.
+
+CityMatch évite d'utiliser des indicateurs non fiables comme un score scolaire inventé ou un taux de réussite au brevet si la donnée n'est pas correctement intégrée.
+
+## Critères pour les actifs
+
+Les critères utiles sont :
+
+- taux de chômage ;
+- nombre d'établissements actifs ;
+- établissements pour 1000 habitants ;
+- prix immobilier ;
+- fibre ;
+- distance à une ville de référence ;
+- transports, notamment présence de gares ;
+- taille de ville.
+
+Exemples de demandes :
+- “ville dynamique pour travailler” ;
+- “proche de Bordeaux mais moins chère” ;
+- “je télétravaille, fibre obligatoire, immobilier abordable”.
+
+## Critères pour les seniors
+
+Les critères utiles sont :
+
+- médecins généralistes par habitant ;
+- médecins spécialistes par habitant ;
+- pharmacies par habitant ;
+- hôpitaux / urgences quand disponibles ;
+- prix immobilier ;
+- climat ;
+- sécurité ;
+- distance à la mer ou à la montagne si demandé ;
+- part des plus de 65 ans, à interpréter avec prudence.
+
+Exemples de demandes :
+- “retraité, beaucoup de médecins, climat doux” ;
+- “senior, ville pas trop chère, services de santé proches” ;
+- “Bretagne ou Sud, sécurisée et pratique”.
+
+## Localisation : mer, montagne et ville de référence
+
+CityMatch peut répondre à plusieurs demandes fréquentes :
+
+### Proche de la mer
+
+Critère utilisé :
+- distance_mer_km
+
+Exemples :
+- “bord de mer” ;
+- “à moins de 30 km de la mer” ;
+- “ville côtière”.
+
+### Proche de la montagne
+
+Critère utilisé :
+- distance_montagne_km
+
+Exemples :
+- “proche montagne” ;
+- “ski / randonnée” ;
+- “nature montagneuse”.
+
+### Proche d'une ville de référence
+
+La distance à une ville de référence est calculée à la volée à partir des coordonnées GPS.
+
+Exemples :
+- “proche de Lyon” ;
+- “moins d'1h de Bordeaux” ;
+- “près de Paris mais pas Paris”.
+
+CityMatch ne stocke pas une colonne par ville de référence. Il calcule une distance en kilomètres quand l'utilisateur mentionne une ville.
+
+## Budget immobilier
+
+CityMatch utilise le prix immobilier médian au m².
+
+Quand l'utilisateur donne un budget, le système peut estimer une surface accessible :
+
+surface_estimable_m2 = budget_immobilier / prix_immo_m2
+
+Exemple :
+- budget : 200 000 €
+- prix immobilier : 2 000 €/m²
+- surface estimable : environ 100 m²
+
+Ce calcul ne remplace pas une recherche immobilière réelle. Il sert seulement à comparer les villes entre elles.
+
+## Taille de ville
+
+CityMatch peut interpréter les préférences de population :
+
+- village / très petite ville : moins de 10 000 habitants ;
+- petite ville : 10 000 à 50 000 habitants ;
+- ville moyenne : 50 000 à 150 000 habitants ;
+- grande ville : plus de 150 000 habitants.
+
+Une demande comme “ville calme” est généralement traduite par :
+- population modérée ;
+- bon score de sécurité ;
+- prix immobilier éventuellement plus accessible.
+
+## Qualité de l'air
+
+Critère utilisé :
+- qualite_air_score
+
+La qualité de l'air est utilisée uniquement lorsqu'une donnée ATMO fiable est disponible.
+
+Si une ville n'a pas de donnée air disponible, CityMatch ne doit pas l'interpréter comme une mauvaise qualité de l'air. La donnée est simplement indisponible.
+
+## Climat
+
+Critères utiles :
+
+- ensoleillement_h_an ;
+- temperature_moyenne ;
+- precipitations_mm ;
+- score_climat.
+
+Ces indicateurs sont orientatifs. Ils permettent de répondre à des demandes comme :
+- “climat chaud” ;
+- “climat doux” ;
+- “je ne supporte pas la chaleur” ;
+- “pas trop de pluie”.
+
+Ils ne remplacent pas une analyse météo fine quartier par quartier.
+
+## Nature et espaces verts
+
+CityMatch ne score pas actuellement la “nature proche” avec une colonne dédiée, car la source géographique testée n'avait pas une couverture suffisante.
+
+Pour éviter les biais, le système n'utilise pas de faux score nature.
+
+En attendant une source nationale fiable, les demandes liées à la nature sont traitées avec des critères objectifs disponibles :
+- distance_mer_km ;
+- distance_montagne_km ;
+- population ;
+- sécurité ;
+- climat.
+
+## Méthode de scoring
+
+CityMatch applique une méthode simple :
+
+1. chaque indicateur est normalisé sur une échelle commune ;
+2. certains critères sont inversés quand “plus bas = mieux” ;
+3. chaque critère est pondéré selon le profil utilisateur ;
+4. un score global classe les villes candidates ;
+5. les villes sans donnée pour un critère ne doivent pas être pénalisées fortement.
+
+## Limites
+
+CityMatch est une aide à la décision.
+
+Les résultats doivent être complétés par :
+- une visite sur place ;
+- une recherche immobilière réelle ;
+- les transports quotidiens ;
+- les besoins familiaux précis ;
+- le ressenti personnel.
+
+Le but est de proposer une première sélection cohérente, pas de remplacer le jugement humain.

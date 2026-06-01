@@ -1,0 +1,147 @@
+# Base Permanente des Équipements — Méthodologie INSEE / CityMatch
+
+## Présentation
+
+La Base Permanente des Équipements, ou BPE, est une source statistique produite par l'INSEE.
+
+Elle recense de nombreux équipements et services accessibles à la population :
+- commerces ;
+- enseignement ;
+- santé ;
+- services aux particuliers ;
+- transports ;
+- sports, loisirs et culture ;
+- tourisme.
+
+CityMatch utilise la BPE pour mesurer la disponibilité de certains services dans les communes.
+
+## Pourquoi utiliser la BPE ?
+
+La BPE est utile car elle permet de comparer les villes sur des équipements concrets :
+
+- crèches ;
+- écoles ;
+- collèges ;
+- lycées ;
+- médecins ;
+- pharmacies ;
+- hôpitaux ;
+- gares ;
+- supermarchés ;
+- restaurants ;
+- équipements sportifs ;
+- bibliothèques ;
+- cinémas.
+
+Ces données sont plus fiables qu'un ressenti ou qu'une note subjective.
+
+## Utilisation dans CityMatch
+
+CityMatch n'utilise pas tous les types d'équipements BPE. Le système conserve uniquement les équipements utiles au matching résidentiel et suffisamment interprétables.
+
+Exemples de champs bruts :
+- nb_creches ;
+- nb_ecoles_primaires ;
+- nb_colleges ;
+- nb_lycees ;
+- nb_medecins_generalistes ;
+- nb_pharmacies ;
+- nb_hopitaux ;
+- nb_gares ;
+- nb_supermarches ;
+- nb_restaurants.
+
+## Pourquoi utiliser des ratios ?
+
+Comparer uniquement le nombre brut d'équipements favorise mécaniquement les grandes villes.
+
+Exemple :
+- une grande ville aura plus de médecins en nombre absolu ;
+- une petite ville peut pourtant avoir une meilleure densité médicale par habitant.
+
+CityMatch privilégie donc des ratios :
+
+- creches_pour_1000 ;
+- medecins_pour_1000 ;
+- medecins_specialistes_pour_1000 ;
+- nb_pharmacies_pour_1000 ;
+- ecoles_pour_1000_enfants ;
+- nb_lycees_pour_1000_ados ;
+- supermarches_pour_1000.
+
+Ces ratios permettent une comparaison plus juste entre villes de tailles différentes.
+
+## Santé
+
+Les équipements de santé utilisés peuvent inclure :
+
+- médecins généralistes ;
+- dentistes ;
+- ophtalmologues ;
+- pédiatres ;
+- pharmacies ;
+- hôpitaux ;
+- urgences.
+
+Pour les profils seniors ou les utilisateurs qui mentionnent la santé, CityMatch donne plus d'importance aux indicateurs médicaux.
+
+## Famille et éducation
+
+Pour les familles, CityMatch utilise notamment :
+
+- crèches ;
+- écoles primaires ;
+- collèges ;
+- lycées.
+
+CityMatch évite d'utiliser un score scolaire inventé. Les données réellement utilisées sont liées à l'offre d'équipements éducatifs et non à une promesse de qualité scolaire absolue.
+
+## Services et vie pratique
+
+La BPE permet aussi de mesurer :
+
+- supermarchés ;
+- restaurants ;
+- équipements sportifs ;
+- bibliothèques ;
+- cinémas ;
+- gares.
+
+Ces critères peuvent être utiles pour des demandes comme :
+- “commodités proches” ;
+- “ville pratique” ;
+- “restaurants et sorties” ;
+- “transports”.
+
+## Limites de la BPE
+
+La BPE indique la présence d'équipements, mais pas toujours :
+
+- leur qualité ;
+- leurs horaires ;
+- leur saturation ;
+- leur accessibilité réelle en transport ;
+- leur distance exacte au logement.
+
+Elle doit donc être interprétée comme un indicateur objectif de disponibilité, pas comme une garantie de qualité.
+
+## Bonnes pratiques dans CityMatch
+
+Pour éviter les biais :
+
+1. utiliser des ratios plutôt que seulement des volumes bruts ;
+2. ne pas pénaliser abusivement les petites villes ;
+3. interpréter les équipements rares avec prudence ;
+4. croiser la BPE avec d'autres dimensions : sécurité, prix, population, climat, fibre.
+
+## Résumé
+
+La BPE est une source solide pour mesurer l'offre d'équipements et de services.
+
+Dans CityMatch, elle sert principalement à répondre aux besoins liés à :
+- la famille ;
+- la santé ;
+- les commerces ;
+- les services de proximité ;
+- les transports ;
+- les loisirs.

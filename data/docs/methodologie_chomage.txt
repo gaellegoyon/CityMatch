@@ -1,0 +1,77 @@
+# Taux de chômage localisé — Méthodologie INSEE / CityMatch
+
+## Définition
+
+Le taux de chômage utilisé à l'échelle communale est un indicateur issu des données statistiques disponibles, notamment le recensement de la population.
+
+Il représente la part des actifs déclarés au chômage parmi la population active.
+
+Formule simplifiée :
+
+taux_chomage = nombre de chômeurs / population active
+
+## Interprétation
+
+Le taux de chômage est un indicateur du contexte économique local.
+
+Il peut aider à identifier :
+- un territoire dynamique ;
+- une zone avec davantage de difficultés économiques ;
+- un bassin de vie où l'emploi peut être plus ou moins accessible.
+
+## Seuils indicatifs
+
+Les seuils suivants sont seulement des repères :
+
+- moins de 7 % : contexte économique plutôt favorable ;
+- 7 % à 10 % : situation proche d'une moyenne nationale ou régionale selon les périodes ;
+- 10 % à 15 % : tension économique modérée ;
+- plus de 15 % : difficultés économiques plus marquées.
+
+Ces seuils ne doivent pas être interprétés comme des vérités absolues.
+
+## Utilisation dans CityMatch
+
+CityMatch utilise le taux de chômage lorsque l'utilisateur mentionne :
+
+- emploi ;
+- dynamisme économique ;
+- bassin d'emploi ;
+- ville active ;
+- opportunités professionnelles.
+
+Le critère est généralement considéré comme “plus bas = mieux”.
+
+## Limites
+
+Le taux de chômage communal a plusieurs limites :
+
+1. il peut avoir un décalage temporel ;
+2. il ne décrit pas directement les offres d'emploi actuelles ;
+3. il ne capture pas toujours les emplois frontaliers ;
+4. il ne mesure pas la qualité des emplois ;
+5. il ne tient pas compte du télétravail ;
+6. il peut varier fortement selon la structure de population.
+
+## Croisement avec d'autres critères
+
+Pour mieux interpréter l'économie locale, CityMatch peut croiser le chômage avec :
+
+- nb_entreprises ;
+- entreprises_pour_1000 ;
+- revenu_median ;
+- prix_immo_m2 ;
+- population ;
+- proximité d'une grande ville.
+
+## Exemple
+
+Une ville avec un chômage élevé mais proche d'une métropole peut rester intéressante pour un utilisateur qui travaille déjà à distance ou qui recherche un logement abordable.
+
+À l'inverse, une ville avec un faible chômage mais des prix immobiliers très élevés peut ne pas convenir à un budget limité.
+
+## Résumé
+
+Le taux de chômage est un indicateur utile, mais il ne doit jamais être utilisé seul.
+
+Dans CityMatch, il est intégré dans un scoring multicritères pour éviter de réduire une ville à son seul marché de l'emploi.
