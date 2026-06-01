@@ -140,6 +140,70 @@ def extract_reference_city_from_text(user_text: str) -> dict:
     return {}
 
 
+def extract_requested_regions_from_text(user_text: str) -> list[str]:
+    """
+    Détecte les régions explicitement demandées par l'utilisateur.
+
+    Exemple :
+        "Bretagne ou Sud" → ["Bretagne", "Provence-Alpes-Côte d'Azur", "Occitanie"]
+    """
+    if not user_text:
+        return []
+
+    text = normalize_reference_name(user_text)
+    raw_lower = user_text.lower()
+
+    regions: list[str] = []
+
+    def add(region: str) -> None:
+        if region not in regions:
+            regions.append(region)
+
+    if any(term in text for term in ["bretagne", "breton", "bretonne"]):
+        add("Bretagne")
+
+    if any(term in text for term in ["normandie", "normand", "normande"]):
+        add("Normandie")
+
+    if any(term in text for term in ["nouvelle aquitaine", "aquitaine"]):
+        add("Nouvelle-Aquitaine")
+
+    if "pays de la loire" in text:
+        add("Pays de la Loire")
+
+    if "occitanie" in text:
+        add("Occitanie")
+
+    if any(term in raw_lower for term in ["paca", "provence", "côte d'azur", "cote d'azur"]):
+        add("Provence-Alpes-Côte d'Azur")
+
+    if any(term in text for term in ["sud", "sud de la france"]):
+        add("Provence-Alpes-Côte d'Azur")
+        add("Occitanie")
+
+    if any(term in text for term in ["auvergne rhone alpes", "rhone alpes", "rhône alpes"]):
+        add("Auvergne-Rhône-Alpes")
+
+    if any(term in text for term in ["ile de france", "paris"]):
+        add("Île-de-France")
+
+    if "grand est" in text:
+        add("Grand Est")
+
+    if any(term in text for term in ["hauts de france", "haut de france"]):
+        add("Hauts-de-France")
+
+    if "centre val de loire" in text:
+        add("Centre-Val de Loire")
+
+    if any(term in text for term in ["bourgogne", "franche comte", "franche comté"]):
+        add("Bourgogne-Franche-Comté")
+
+    if "corse" in text:
+        add("Corse")
+
+    return regions
+
 def _detect_exclude_reference(text: str, city: str) -> bool:
     """Détecte les formulations du type 'près de Paris mais pas Paris'."""
     city_norm = normalize_reference_name(city)
@@ -327,6 +391,12 @@ def post_correct_criteria(criteria: dict, user_messages: str) -> dict:
     """
     text = user_messages.lower()
 
+    # Conserver les régions explicitement demandées pour pouvoir expliquer
+    # ensuite pourquoi certaines n'apparaissent pas dans le top 10 du rapport.
+    requested_regions = extract_requested_regions_from_text(user_messages)
+    if requested_regions:
+        criteria["regions_demandees"] = requested_regions
+
     # ── 1. Détecter proximité ville de référence ─────────────────────────────
     proximite_detectee = False
     reference = extract_reference_city_from_text(user_messages)
@@ -366,13 +436,47 @@ def post_correct_criteria(criteria: dict, user_messages: str) -> dict:
 
 
     # ── 4b. Nature / verdure ────────────────────────────────────────────────
-    # Critère désactivé en V1 : pas de source de couverture assez fiable.
+    # Pas de source fiable en V1 pour mesurer directement les espaces naturels.
+    # On utilise donc un proxy assumé "cadre peu urbain" :
+    # - taille de ville limitée ;
+    # - calme/sécurité ;
+    # - prix immobilier plutôt bas.
     nature_terms = [
         "nature", "verdure", "ville verte", "forêt", "foret", "bois",
         "campagne", "espaces naturels", "parc naturel", "randonnée", "randonnee"
     ]
     if any(term in text for term in nature_terms):
-        console.print("[dim]🌿 Nature mentionnée : aucun critère ajouté faute de source fiable[/dim]")
+        criteria.setdefault("criteres", {})
+
+        # Favoriser les villes plus calmes / moins urbaines.
+        criteria["criteres"]["score_securite"] = max(
+            int(criteria["criteres"].get("score_securite", 0) or 0),
+            4,
+        )
+
+        # Le prix bas est un proxy indirect de zones moins tendues / moins urbaines.
+        criteria["criteres"]["prix_immo_m2"] = max(
+            int(criteria["criteres"].get("prix_immo_m2", 0) or 0),
+            3,
+        )
+
+        # Si l'utilisateur n'a pas donné de borne plus stricte, limiter la taille.
+        criteria.setdefault("population_max", 50000)
+
+        criteria.setdefault("criteres_indirects", [])
+        if "nature proche" not in criteria["criteres_indirects"]:
+            criteria["criteres_indirects"].append("nature proche")
+
+        criteria.setdefault("notes", [])
+        nature_note = (
+            "Votre envie de nature a bien été prise en compte. "
+            "Comme nous n'avons pas encore une donnée fiable sur les espaces verts, "
+            "CityMatch privilégie des villes plus petites, calmes et abordables."
+        )
+        if nature_note not in criteria["notes"]:
+            criteria["notes"].append(nature_note)
+
+        console.print("[dim]🌿 Nature mentionnée : proxy cadre peu urbain activé[/dim]")
 
     # ── 5. Supprimer strictement les critères invalides ─────────────────────
     cleaned = {}

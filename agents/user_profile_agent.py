@@ -196,6 +196,11 @@ def _handle_complete_profile(
     all_user_text = _collect_all_user_text(state)
     criteria = post_correct_criteria(criteria, all_user_text)
 
+    # Important pour les rapports :
+    # preferences_texte peut être reformulé par le LLM et perdre des informations
+    # utiles comme "Bretagne ou Sud". On conserve donc le texte utilisateur brut.
+    criteria["user_input_raw"] = all_user_text
+
     is_valid, errors = validate_criteria_json(criteria)
     if not is_valid:
         console.print(f"[yellow]⚠️  Profil JSON partiellement invalide : {errors}[/yellow]")
