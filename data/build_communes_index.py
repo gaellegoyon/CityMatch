@@ -25,6 +25,7 @@ import requests
 # ── Mapping département → région métropolitaine (source : INSEE COG 2025) ─────
 # Inclut uniquement :
 # - les départements métropolitains 01 à 95
+from datetime import datetime
 # - la Corse 2A / 2B
 #
 # Exclut volontairement :
@@ -209,7 +210,7 @@ def main():
         "scope": "France métropolitaine uniquement",
         "nb_communes": len(communes),
         "communes": communes,
-    }
+        "generated_at": datetime.now().isoformat(),
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:

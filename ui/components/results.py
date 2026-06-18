@@ -16,6 +16,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from config.settings import AVAILABLE_CRITERIA
+from config.settings import REPORTS_DIR
 
 
 def render_results_panel() -> None:
@@ -271,7 +272,17 @@ def render_report_tab() -> None:
     )
 
     report_path = Path(st.session_state.report_path)
-    if report_path.exists() and report_path.suffix == ".pdf":
+    try:
+        reports_root = REPORTS_DIR.resolve()
+        report_resolved = report_path.resolve()
+    except Exception:
+        return
+
+    if (
+        report_path.exists()
+        and report_path.suffix == ".pdf"
+        and (report_resolved == reports_root or reports_root in report_resolved.parents)
+    ):
         with open(report_path, "rb") as f:
             st.download_button(
                 "📥 Télécharger le rapport (PDF)",

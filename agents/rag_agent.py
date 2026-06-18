@@ -25,6 +25,7 @@ from rich.console import Console
 
 from config.settings import EMBEDDING_MODEL, PDF_DIR, VECTORSTORE_DIR
 from graph.state import CityMatchState
+from utils.security import sanitize_untrusted_context
 
 
 console = Console()
@@ -305,7 +306,9 @@ def retrieve_context(question: str, k: int = 4) -> str:
     context_parts = []
     for doc in docs:
         source = doc.metadata.get("source", "inconnu")
-        context_parts.append(f"[Source: {source}]\n{doc.page_content}")
+        context_parts.append(
+            sanitize_untrusted_context(doc.page_content, source_label=str(source))
+        )
 
     return "\n\n---\n\n".join(context_parts)
 

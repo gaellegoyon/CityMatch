@@ -12,6 +12,7 @@ from config.settings import TAVILY_API_KEY
 from db.models import SessionLocal, WebSearchCache, AgentLog
 from graph.state import CityMatchState
 from rich.console import Console
+from utils.security import sanitize_untrusted_context
 
 console = Console()
 
@@ -113,7 +114,15 @@ def run_web_search_agent(state: CityMatchState) -> CityMatchState:
         city_copy = city.copy()
         city_name = city.get("nom", "")
         web_info = all_results.get(city_name, [])
-        city_copy["web_insights"] = " | ".join(r.get("content", "")[:200] for r in web_info[:3] if r.get("content"))
+        web_excerpt = " | ".join(
+            r.get("content", "")[:200]
+            for r in web_info[:3]
+            if r.get("content")
+        )
+        city_copy["web_insights"] = sanitize_untrusted_context(
+            web_excerpt,
+            source_label=city_name or "web",
+        )
         city_copy["web_sources"] = [r.get("url", "") for r in web_info[:3]]
         enriched.append(city_copy)
 

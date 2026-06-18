@@ -10,6 +10,7 @@ l'utilisateur peut simplement préciser sa demande dans le chat
 
 from __future__ import annotations
 
+import html
 import streamlit as st
 
 from ui.services.session import update_session_from_agent_result
@@ -41,9 +42,10 @@ def render_chat_history() -> None:
             content = msg.get("content", "")
             css_class = "user-msg" if role == "user" else "ai-msg"
             icon = "👤" if role == "user" else "🤖"
+            safe_content = html.escape(str(content))
 
             st.markdown(
-                f'<div class="chat-message {css_class}"><b>{icon}</b> {content}</div>',
+                f'<div class="chat-message {css_class}"><b>{icon}</b> {safe_content}</div>',
                 unsafe_allow_html=True,
             )
 

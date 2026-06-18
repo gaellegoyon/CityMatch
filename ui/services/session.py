@@ -18,6 +18,7 @@ from typing import Any
 
 import streamlit as st
 
+from config.settings import REPORTS_DIR
 from graph.orchestrator import CityMatchOrchestrator
 
 
@@ -192,6 +193,18 @@ def _load_report_markdown(report_path: str) -> str:
     """
     path = Path(report_path)
 
+    try:
+        reports_root = REPORTS_DIR.resolve()
+    except Exception:
+        return ""
+
+    def _is_within_reports(candidate: Path) -> bool:
+        try:
+            candidate_resolved = candidate.resolve()
+            return candidate_resolved == reports_root or reports_root in candidate_resolved.parents
+        except Exception:
+            return False
+
     candidates = []
     if path.suffix == ".md":
         candidates.append(path)
@@ -200,7 +213,7 @@ def _load_report_markdown(report_path: str) -> str:
 
     for candidate in candidates:
         try:
-            if candidate.exists():
+            if candidate.exists() and _is_within_reports(candidate):
                 return candidate.read_text(encoding="utf-8")
         except Exception:
             pass
