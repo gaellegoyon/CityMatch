@@ -99,6 +99,35 @@ INJECTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         r"\b(ignore|oublie|forget)\s+"
         r"(all\s+future|les\s+futures|toutes\s+les\s+futures)\s+instructions\b",
         r"\balways\s+respond\s+with\b",
+         # Demande de répétition / exfiltration d'instructions (Prompt Leakage)
+        r"(répète|repete|reproduce|affiche|donne|list)\s+(toutes\s+les|tes|les|your|all|previous)\s+instructions",
+        r"r[eé]p[eè]t[eésx]?\s+(tout[es]*\s+)?(te[sx]|les[x]|your|all|previous)\s+instruction",
+        r"répète\s+le\s+texte\s+ci-dessus",
+        r"repeat\s+the\s+instructions",
+        r"system\s+prompt\s+leak",
+
+        # Modification permanente du comportement futur / Hijacking
+        r"ignores?\s+(toutes\s+les\s+futures|les\s+futures|all\s+future)\s+instructions",
+        r"ign[oô]r[eésx]?\s+(tout[es]*\s+)?(te[sx]|le[sx]|your|all|previous|pr[eé]c[eé]dent[es]*)\s+instruction",
+        r"réponds?\s+toujours\s+.*",
+        r"always\s+respond\s+with\s+.*",
+        r"si\s+quelqu'un\s+te\s+demande\s+.*",
+
+        # Bloque "forget your instructions", "new instructions"
+        r"forget\s+(your|all|previous)\s+instructions",
+        r"new\s+instructions?\s*:",
+
+        # Bloque "you are now an assistant without restrictions" ou "act as an assistant without restrictions"
+        r"you\s+are\s+now\s+a\s+.*without\s+restrictions",
+        r"act\s+as\s+(a|an)\s+\w+\s+without\s+restrictions",
+
+        # Bloque "system prompt leak" ou "repeat the instructions"
+        r"repeat\s+(the\s+)?instructions",
+        r"system\s+prompt\s+leak",
+
+        # Bloque "ignore previous context"
+        r"ign[oô]r[eésx]?\s+previous\s+context",
+        r"previous\s+conversation",
     )
 )
 
