@@ -8,39 +8,62 @@ Il représente la part des actifs déclarés au chômage parmi la population act
 
 Formule simplifiée :
 
-taux_chomage = nombre de chômeurs / population active
+taux_chomage = nombre de chômeurs / population active × 100
+
+Cet indicateur est exprimé en pourcentage.
 
 ## Interprétation
 
 Le taux de chômage est un indicateur du contexte économique local.
 
 Il peut aider à identifier :
-- un territoire dynamique ;
-- une zone avec davantage de difficultés économiques ;
-- un bassin de vie où l'emploi peut être plus ou moins accessible.
+
+* un territoire dynamique ;
+* une zone avec davantage de difficultés économiques ;
+* un bassin de vie où l'emploi peut être plus ou moins accessible.
+
+Un taux de chômage plus bas est généralement considéré comme préférable dans le scoring CityMatch, mais il ne doit jamais être interprété seul.
 
 ## Seuils indicatifs
 
 Les seuils suivants sont seulement des repères :
 
-- moins de 7 % : contexte économique plutôt favorable ;
-- 7 % à 10 % : situation proche d'une moyenne nationale ou régionale selon les périodes ;
-- 10 % à 15 % : tension économique modérée ;
-- plus de 15 % : difficultés économiques plus marquées.
+* moins de 7 % : contexte économique plutôt favorable ;
+* 7 % à 10 % : situation proche d'une moyenne nationale ou régionale selon les périodes ;
+* 10 % à 15 % : tension économique modérée ;
+* plus de 15 % : difficultés économiques plus marquées.
 
-Ces seuils ne doivent pas être interprétés comme des vérités absolues.
+Ces seuils ne doivent pas être interprétés comme des vérités absolues. Ils servent uniquement à faciliter la lecture des résultats.
 
 ## Utilisation dans CityMatch
 
 CityMatch utilise le taux de chômage lorsque l'utilisateur mentionne :
 
-- emploi ;
-- dynamisme économique ;
-- bassin d'emploi ;
-- ville active ;
-- opportunités professionnelles.
+* emploi ;
+* dynamisme économique ;
+* bassin d'emploi ;
+* ville active ;
+* opportunités professionnelles ;
+* contexte économique local.
 
-Le critère est généralement considéré comme “plus bas = mieux”.
+Le critère associé est :
+
+* taux_chomage.
+
+Dans le scoring, ce critère est traité comme “plus bas = mieux”.
+
+Lorsque le poids du critère est élevé, CityMatch favorise les villes dont le taux de chômage est plus faible parmi les villes candidates.
+
+## Préfiltrage et scoring
+
+Le taux de chômage peut être utilisé de deux façons :
+
+1. comme critère de scoring pondéré ;
+2. comme filtre indicatif si l'utilisateur insiste fortement sur l'emploi ou le dynamisme économique.
+
+Dans tous les cas, CityMatch évite d'exclure automatiquement une ville uniquement à cause du chômage si d'autres critères importants sont très favorables.
+
+Le score final reste multicritères.
 
 ## Limites
 
@@ -51,18 +74,26 @@ Le taux de chômage communal a plusieurs limites :
 3. il ne capture pas toujours les emplois frontaliers ;
 4. il ne mesure pas la qualité des emplois ;
 5. il ne tient pas compte du télétravail ;
-6. il peut varier fortement selon la structure de population.
+6. il peut varier fortement selon la structure de population ;
+7. il ne reflète pas toujours le marché de l'emploi à l'échelle du bassin de vie.
 
 ## Croisement avec d'autres critères
 
 Pour mieux interpréter l'économie locale, CityMatch peut croiser le chômage avec :
 
-- nb_entreprises ;
-- entreprises_pour_1000 ;
-- revenu_median ;
-- prix_immo_m2 ;
-- population ;
-- proximité d'une grande ville.
+* nb_entreprises ;
+* entreprises_pour_1000 ;
+* revenu_median ;
+* prix_immo_m2 ;
+* population ;
+* proximité d'une grande ville.
+
+Ces critères permettent de mieux distinguer :
+
+* une ville économiquement fragile ;
+* une ville abordable mais proche d'un bassin d'emploi ;
+* une ville dynamique mais chère ;
+* une ville adaptée au télétravail.
 
 ## Exemple
 

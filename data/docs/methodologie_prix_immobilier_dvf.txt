@@ -1,0 +1,158 @@
+# Prix immobilier — Méthodologie DVF / CityMatch
+
+## Présentation
+
+CityMatch utilise les données DVF, Demandes de Valeurs Foncières, pour estimer les prix immobiliers au mètre carré.
+
+DVF recense des transactions immobilières réelles enregistrées en France.
+
+Cette source permet d'obtenir un indicateur objectif du niveau de prix immobilier dans une commune.
+
+## Données utilisées
+
+CityMatch utilise principalement :
+
+- prix_immo_m2.
+
+Ce critère correspond à un prix immobilier médian ou représentatif au mètre carré, calculé à partir des transactions disponibles.
+
+Il sert à comparer les communes entre elles, notamment lorsque l'utilisateur mentionne :
+
+- budget limité ;
+- achat immobilier ;
+- maison ;
+- appartement ;
+- ville pas chère ;
+- immobilier abordable ;
+- prix raisonnable.
+
+## Pourquoi utiliser le prix au m² ?
+
+Le prix total d'un bien dépend fortement de sa surface.
+
+Comparer seulement les prix de vente bruts serait trompeur.
+
+Exemple :
+
+- une maison de 150 m² coûtera généralement plus cher qu'un appartement de 45 m² ;
+- cela ne signifie pas forcément que la commune est plus chère au mètre carré.
+
+Le prix au m² permet une comparaison plus homogène entre communes.
+
+## Calcul simplifié
+
+Formule générale :
+
+prix_immo_m2 = valeur foncière / surface réelle bâtie
+
+CityMatch doit ensuite agréger plusieurs transactions pour obtenir un indicateur communal.
+
+L'utilisation d'une médiane est préférable à une moyenne lorsque c'est possible, car elle limite l'effet des valeurs extrêmes.
+
+## Gestion des valeurs aberrantes
+
+Les données DVF peuvent contenir des cas difficiles à interpréter :
+
+- ventes groupées ;
+- plusieurs lots dans une même mutation ;
+- surfaces manquantes ou incohérentes ;
+- valeurs foncières atypiques ;
+- biens très particuliers ;
+- doublons liés aux lignes multiples d'une même mutation.
+
+CityMatch doit donc éviter de compter plusieurs fois une même vente et filtrer les valeurs manifestement aberrantes.
+
+## Utilisation dans CityMatch
+
+Dans CityMatch, prix_immo_m2 est généralement traité comme “plus bas = mieux”.
+
+Si l'utilisateur indique que le budget est important, le poids de prix_immo_m2 augmente.
+
+Exemples :
+
+- “budget serré” → prix_immo_m2 important ;
+- “immobilier abordable” → prix_immo_m2 important ;
+- “maison à 250k” → prix_immo_m2 utilisé avec budget_immobilier et surface_min_m2.
+
+## Budget immobilier
+
+Quand l'utilisateur donne un budget, CityMatch peut estimer une surface accessible :
+
+surface_estimable_m2 = budget_immobilier / prix_immo_m2
+
+Exemple :
+
+- budget_immobilier = 200 000 € ;
+- prix_immo_m2 = 2 000 €/m² ;
+- surface_estimable_m2 = 100 m².
+
+Cette surface est une estimation comparative. Elle ne garantit pas qu'un bien réel correspondant au budget soit disponible.
+
+## Surface minimale
+
+CityMatch peut aussi utiliser une surface minimale réaliste selon le profil :
+
+- maison : environ 80 m² ;
+- appartement : environ 45 m² ;
+- famille avec enfants : environ 90 m² ;
+- couple sans enfants : environ 55 m² ;
+- senior seul ou couple senior : environ 55 m² ;
+- aucun indice : environ 60 m².
+
+Ces valeurs sont des hypothèses de comparaison, pas des règles absolues.
+
+## Préfiltrage par budget
+
+Si l'utilisateur donne un budget et une surface minimale, CityMatch peut préfiltrer les villes dont le prix au m² est trop élevé.
+
+Exemple :
+
+budget_immobilier = 200 000 €
+surface_min_m2 = 80 m²
+
+prix maximal théorique = 200 000 / 80 = 2 500 €/m²
+
+CityMatch peut appliquer une marge de tolérance pour ne pas exclure trop brutalement certaines villes.
+
+## Limites
+
+Le prix immobilier DVF a plusieurs limites :
+
+1. les données peuvent avoir un décalage temporel ;
+2. les prix varient fortement selon les quartiers ;
+3. les biens vendus ne représentent pas toujours toute l'offre disponible ;
+4. les maisons et appartements peuvent avoir des marchés très différents ;
+5. certaines communes ont peu de transactions ;
+6. les prix réels d'annonces peuvent différer des prix de vente enregistrés ;
+7. les biens atypiques peuvent influencer les résultats si les données sont mal filtrées.
+
+## Interprétation
+
+Un prix immobilier faible peut être un avantage pour un utilisateur avec un budget limité.
+
+Mais il doit être croisé avec d'autres critères :
+
+- sécurité ;
+- accès aux services ;
+- santé ;
+- emploi ;
+- fibre ;
+- transports ;
+- climat ;
+- distance à une ville de référence.
+
+Une ville peu chère n'est pas automatiquement une ville adaptée.
+
+## Exemple
+
+Une commune avec un prix au m² bas peut être intéressante pour acheter une maison plus grande.
+
+Cependant, si elle est très isolée, mal connectée ou pauvre en services, elle peut ne pas correspondre au profil utilisateur.
+
+À l'inverse, une commune plus chère peut rester pertinente si elle offre un meilleur accès à l'emploi, aux écoles, aux médecins ou aux transports.
+
+## Résumé
+
+DVF permet à CityMatch d'intégrer un indicateur immobilier objectif et comparable.
+
+Dans le scoring, prix_immo_m2 est utile pour mesurer l'accessibilité financière d'une ville, mais il ne remplace pas une recherche immobilière réelle.

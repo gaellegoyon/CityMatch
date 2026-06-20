@@ -1,0 +1,123 @@
+# Sécurité et criminalité — Méthodologie SSMSI / CityMatch
+
+## Présentation
+
+CityMatch utilise des données publiques de sécurité issues du SSMSI, le Service statistique ministériel de la sécurité intérieure.
+
+Ces données permettent d'obtenir des indicateurs objectifs sur certains faits enregistrés par les forces de sécurité.
+
+Elles ne mesurent pas directement le ressenti de sécurité, mais elles donnent un point de comparaison utile entre communes.
+
+## Données utilisées
+
+CityMatch peut utiliser plusieurs indicateurs liés à la sécurité :
+
+- criminalite_pour_1000 ;
+- cambriolages_pour_1000 ;
+- violences_physiques_pour_1000 ;
+- score_securite.
+
+Les indicateurs exprimés “pour 1000 habitants” permettent de comparer des villes de tailles différentes.
+
+Le score_securite est un indicateur agrégé utilisé pour rendre la lecture plus simple. Il doit rester interprété avec prudence.
+
+## Pourquoi utiliser des ratios ?
+
+Comparer uniquement le nombre brut de faits enregistrés favoriserait mécaniquement les petites communes et pénaliserait les grandes villes.
+
+Exemple :
+
+- une grande ville peut avoir plus de faits enregistrés en volume ;
+- une petite ville peut avoir un taux plus élevé rapporté à sa population.
+
+CityMatch privilégie donc des indicateurs rapportés à la population, par exemple :
+
+criminalite_pour_1000 = nombre de faits enregistrés / population × 1000
+
+Cela permet une comparaison plus équilibrée entre communes.
+
+## Interprétation
+
+Dans CityMatch, les indicateurs de criminalité sont généralement traités comme “plus bas = mieux”.
+
+À l'inverse, score_securite est traité comme “plus haut = mieux”.
+
+Une ville avec une criminalité plus faible ou un meilleur score de sécurité sera donc favorisée si l'utilisateur indique que la sécurité est importante.
+
+## Utilisation dans CityMatch
+
+CityMatch utilise les critères de sécurité lorsque l'utilisateur mentionne :
+
+- sécurité ;
+- ville sûre ;
+- tranquille ;
+- calme ;
+- peu de criminalité ;
+- éviter les cambriolages ;
+- environnement familial rassurant.
+
+Critères associés possibles :
+
+- score_securite ;
+- criminalite_pour_1000 ;
+- cambriolages_pour_1000 ;
+- violences_physiques_pour_1000.
+
+Pour éviter de surinterpréter les données, CityMatch privilégie souvent score_securite ou criminalite_pour_1000 dans le scoring principal.
+
+## Sécurité et calme
+
+Une demande comme “ville calme” peut être partiellement reliée à la sécurité, mais les deux notions ne sont pas identiques.
+
+Le calme dépend aussi :
+
+- du bruit ;
+- du trafic ;
+- de la densité urbaine ;
+- du quartier ;
+- de la vie nocturne ;
+- de la perception personnelle.
+
+CityMatch peut donc utiliser la sécurité comme un indicateur partiel, mais il ne doit pas prétendre mesurer parfaitement le calme réel d'une ville.
+
+## Limites des données de sécurité
+
+Les données SSMSI ont plusieurs limites :
+
+1. elles mesurent les faits enregistrés, pas tous les faits réellement commis ;
+2. le dépôt de plainte varie selon les territoires et les types d'infractions ;
+3. les grandes villes peuvent concentrer davantage d'activités et donc davantage de faits ;
+4. les données communales ne décrivent pas les différences entre quartiers ;
+5. les chiffres peuvent avoir un décalage temporel ;
+6. un taux élevé sur une petite population peut être instable statistiquement.
+
+Ces limites doivent être rappelées dans l'interprétation des résultats.
+
+## Bonnes pratiques dans CityMatch
+
+Pour éviter les biais, CityMatch applique plusieurs principes :
+
+1. utiliser des taux rapportés à la population ;
+2. éviter de réduire une ville à un seul indicateur de sécurité ;
+3. croiser la sécurité avec le prix, la population, les services et le profil utilisateur ;
+4. ne pas afficher une ville comme dangereuse sans nuance ;
+5. distinguer les points de vigilance des exclusions automatiques ;
+6. ne pas utiliser de critères sensibles ou discriminatoires.
+
+## Exemple
+
+Une ville peut avoir un score de sécurité moyen mais être très intéressante pour un utilisateur grâce à :
+
+- un prix immobilier abordable ;
+- une bonne offre de santé ;
+- une bonne couverture fibre ;
+- une proximité avec la mer ou une grande ville ;
+- une population adaptée au profil recherché.
+
+À l'inverse, une ville très bien notée en sécurité peut ne pas convenir si elle est trop chère, trop isolée ou mal adaptée aux critères familiaux.
+
+## Résumé
+
+Les données SSMSI sont utiles pour comparer la sécurité entre communes, mais elles doivent être interprétées avec prudence.
+
+Dans CityMatch, la sécurité est intégrée dans un scoring multicritères afin d'éviter de réduire une ville à son seul niveau de criminalité.

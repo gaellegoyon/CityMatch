@@ -43,6 +43,8 @@ db/*.sqlite3
 db/*backup*.db
 db/*backup*.sqlite
 db/*backup*.sqlite3
+db/*checkpoint*.db
+db/langgraph_checkpoints.db
 
 # Garder éventuellement le dossier db avec un .gitkeep
 !db/.gitkeep
@@ -58,16 +60,19 @@ data/temp/
 # Documents méthodologiques : à garder si tu veux versionner le RAG
 !data/docs/
 !data/docs/*.txt
+!data/docs/*.md
 !data/pdfs/
-!data/pdfs/*.txt
+!data/pdfs/*.pdf
 
 # ─── Vectorstore / ChromaDB ──────────────────────────────────────────────────
 vectorstore/
 chroma/
+chroma_db/
 *.chroma/
 
 # ─── Rapports générés ────────────────────────────────────────────────────────
-reports/output/
+reports/output/*
+reports/generated/*
 reports/*.pdf
 reports/*.html
 reports/*.md
@@ -75,6 +80,7 @@ reports/*.md
 # Garder éventuellement le dossier reports avec un .gitkeep
 !reports/.gitkeep
 !reports/output/.gitkeep
+!reports/generated/.gitkeep
 
 # ─── Logs ────────────────────────────────────────────────────────────────────
 logs/
@@ -94,7 +100,7 @@ htmlcov/
 .ruff_cache/
 .cache/
 
-# ─── Streamlit ────────────────────────────────────────────────────────────────
+# ─── Streamlit ───────────────────────────────────────────────────────────────
 .streamlit/secrets.toml
 
 # Garder la config Streamlit si elle existe
@@ -145,7 +151,7 @@ Desktop.ini
 *.shx
 *.prj
 
-# Exception : ne pas ignorer requirements / docs essentiels
+# ─── Exceptions : fichiers essentiels du projet ──────────────────────────────
 !requirements.txt
 !README.md
 !Dockerfile

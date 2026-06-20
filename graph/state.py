@@ -8,7 +8,9 @@ chaque agent lit certaines clés, en écrit d'autres, puis l'orchestrateur
 route vers le nœud suivant.
 """
 
-from typing import Annotated, Optional, TypedDict
+from __future__ import annotations
+
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -20,44 +22,84 @@ class CityMatchState(TypedDict, total=False):
 
     total=False permet aux agents de mettre à jour seulement les champs utiles
     sans devoir fournir toutes les clés à chaque invocation.
+
+    Les champs listés ici correspondent au contrat partagé entre :
+    - UserProfileAgent ;
+    - DatabaseAgent ;
+    - WebSearchAgent ;
+    - ScoringAgent ;
+    - RAGAgent ;
+    - ReportAgent ;
+    - Orchestrateur LangGraph.
     """
 
-    # Session
+    # ─────────────────────────────────────────────────────────────────────
+    # Session / contrôle global
+    # ─────────────────────────────────────────────────────────────────────
     session_id: str
     iteration: int
-
-    # Conversation
-    messages: Annotated[list[BaseMessage], add_messages]
-    user_input: str
-
-    # Profil utilisateur
-    user_criteria: Optional[dict]
-    user_profile_complete: bool
-
-    # Données villes
-    raw_city_data: Optional[list[dict]]
-    enriched_city_data: Optional[list[dict]]
-
-    # Scoring
-    scored_cities: Optional[list[dict]]
-    top_cities: Optional[list[dict]]
-
-    # RAG
-    rag_context: Optional[str]
-    rag_question: Optional[str]
-
-    # Recherche web
-    web_search_results: Optional[list[dict]]
-    web_search_queries: Optional[list[dict]]
-
-    # Rapport
-    report_markdown: Optional[str]
-    report_pdf_path: Optional[str]
-
-    # Contrôle du flux
-    error: Optional[str]
     should_refine: bool
     analysis_complete: bool
+    user_profile_complete: bool
 
-    # Debug
-    agent_trace: Optional[list[str]]
+    # ─────────────────────────────────────────────────────────────────────
+    # Conversation
+    # ─────────────────────────────────────────────────────────────────────
+    messages: Annotated[list[BaseMessage], add_messages]
+    user_input: str
+    response: str
+    final_response: str
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Profil utilisateur / critères
+    # ─────────────────────────────────────────────────────────────────────
+    user_criteria: dict[str, Any]
+    normalized_criteria: dict[str, Any]
+
+    criteria_notes: list[str]
+    criteres_non_disponibles: list[str]
+    ignored_criteria: list[str]
+
+    ville_reference: str
+    reference_city_coords: tuple[float, float]
+    rayon_reference_km: float
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Données villes
+    # ─────────────────────────────────────────────────────────────────────
+    raw_city_data: list[dict[str, Any]]
+    enriched_city_data: list[dict[str, Any]]
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Scoring
+    # ─────────────────────────────────────────────────────────────────────
+    scored_cities: list[dict[str, Any]]
+    top_cities: list[dict[str, Any]]
+
+    # ─────────────────────────────────────────────────────────────────────
+    # RAG
+    # ─────────────────────────────────────────────────────────────────────
+    rag_question: str
+    rag_context: str
+    rag_sources: list[dict[str, Any]]
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Recherche web
+    # ─────────────────────────────────────────────────────────────────────
+    web_search_results: list[dict[str, Any]]
+    web_search_queries: list[dict[str, Any]]
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Rapport
+    # ─────────────────────────────────────────────────────────────────────
+    report_markdown: str
+    report_pdf_path: str
+    report_path: str
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Erreurs / debug / audit
+    # ─────────────────────────────────────────────────────────────────────
+    error: str
+    errors: list[str]
+    warnings: list[str]
+    agent_trace: list[str]

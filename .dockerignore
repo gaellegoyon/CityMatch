@@ -1,12 +1,20 @@
+# Git
 .git
 .gitignore
+
+# Python — caches / bytecode
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*$py.class
+
+# Tests / qualité
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # Environnements locaux
 venv/
@@ -14,22 +22,41 @@ venv/
 env/
 ENV/
 
-# Secrets
+# Secrets / configuration locale
 .env
+.env.*
+!.env.example
 *.pem
 *.key
+*.crt
+.streamlit/secrets.toml
 
-# Données locales lourdes / générées
+# Bases locales / SQLite / checkpoints LangGraph
 db/*.db
 db/*.sqlite
 db/*.sqlite3
+db/*checkpoint*.db
+db/langgraph_checkpoints.db
+
+# Données locales lourdes / générées
 data/cache/
 vectorstore/
+chroma/
+chroma_db/
+
+# Rapports et sorties générées
 reports/output/
+reports/generated/
 logs/
 
 # Artifacts temporaires
 *.bak
 *.part
 *.tmp
+*.temp
 .DS_Store
+
+# Docker / CI inutiles dans le contexte de build
+docker-compose*.yml
+Dockerfile*
+.github/

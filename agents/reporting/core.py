@@ -7,21 +7,13 @@ Produit :
 - un rapport Markdown ;
 - un rapport PDF propre avec ReportLab ;
 - une analyse lisible des points forts et points de vigilance.
-
-Corrections incluses :
-- pas de doublon de titre dans le PDF ;
-- vrais tableaux PDF pour le classement et les critères ;
-- suppression des emojis dans le PDF pour éviter les carrés noirs ;
-- nombre réel de villes candidates analysées ;
-- formulation honnête si les filtres ont été relâchés ;
-- qualité de l'air 7/10 ou 8/10 non affichée comme vigilance ;
-- qualité de l'air brute affichée sans score normalisé contradictoire.
 """
 
 from __future__ import annotations
 
 import html
 import io
+import logging
 import math
 import re
 import time
@@ -30,11 +22,22 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import AVAILABLE_CRITERIA, MAX_CITIES_IN_REPORT, REPORTS_DIR
+from db.models import AgentLog, SearchSession, SessionLocal
 from graph.state import CityMatchState
-from rich.console import Console
 
 
-console = Console()
+logger = logging.getLogger(__name__)
+
+REPORT_AGENT_NAME = "ReportAgent"
+REPORT_AGENT_ACTION = "generate_report"
+MAX_AGENT_TRACE_ENTRIES = 200
+
+
+def _append_agent_trace(state: CityMatchState, message: str) -> None:
+    """Ajoute une trace courte dans l'état LangGraph."""
+    trace = list(state.get("agent_trace") or [])
+    trace.append(message)
+    state["agent_trace"] = trace[-MAX_AGENT_TRACE_ENTRIES:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +140,9 @@ def _fmt_value(raw: Any, unit: str, critere_key: str) -> str:
     except (TypeError, ValueError):
         return str(raw)
 
+    if not math.isfinite(value):
+        return "N/A"
+
     if "km" in unit or "distance" in critere_key:
         return f"{value:.0f} km"
     if "pct" in critere_key or "taux" in critere_key or "%" in unit:
@@ -167,6 +173,9 @@ def _fmt_number(value: Any, decimals: int = 1, suffix: str = "") -> str:
     except (TypeError, ValueError):
         return "N/A"
 
+    if not math.isfinite(number):
+        return "N/A"
+
     if decimals == 0:
         return f"{number:,.0f}{suffix}"
 
@@ -178,8 +187,10 @@ def _safe_score(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
-    except Exception:
+
+        score = float(value)
+        return score if math.isfinite(score) else None
+    except (TypeError, ValueError):
         return None
 
 
@@ -188,12 +199,14 @@ def _raw_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
-    except Exception:
+
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
         return None
 
 
-def _escape_reportlab(text: str) -> str:
+def _escape_reportlab(text: Any) -> str:
     """Échappe du texte pour ReportLab."""
     return html.escape(str(text), quote=False)
 
@@ -212,7 +225,7 @@ def _markdown_inline_to_reportlab(text: str) -> str:
 
 
 def _plain_text_for_pdf(text: str) -> str:
-    """Supprime les emojis/icônes qui rendent des carrés dans ReportLab."""
+    """Supprime les emojis/icônes qui rendent parfois des carrés dans ReportLab."""
     replacements = {
         "🏙️": "",
         "📋": "",
@@ -221,9 +234,13 @@ def _plain_text_for_pdf(text: str) -> str:
         "🔍": "",
         "📚": "",
         "⚠️": "",
+        "⚠": "",
         "✅": "",
         "⭐": "*",
-        "—": "—",
+        "🌿": "",
+        "🎯": "",
+        "🏠": "",
+        "🏙": "",
     }
 
     clean = str(text)
@@ -231,7 +248,6 @@ def _plain_text_for_pdf(text: str) -> str:
         clean = clean.replace(old, new)
 
     return clean.strip()
-
 
 
 def _smart_title_place(name: str | None) -> str | None:
@@ -249,44 +265,37 @@ def _smart_title_place(name: str | None) -> str | None:
     if not normalized:
         return None
 
-    # Cas simples : "lyon", "paris", "marseille"
     titled = normalized.title()
 
-    # Petites corrections typographiques fréquentes.
     replacements = {
         "Lès": "lès",
-        "Les": "les",
-        "Le ": "Le ",
-        "La ": "La ",
-        "De ": "de ",
-        "Du ": "du ",
-        "Des ": "des ",
-        "D'": "d'",
-        "L'": "l'",
+        " De ": " de ",
+        " Du ": " du ",
+        " Des ": " des ",
+        " D'": " d'",
+        " L'": " l'",
     }
 
     for old, new in replacements.items():
         titled = titled.replace(old, new)
 
-    # La première lettre doit rester majuscule même si la chaîne commence par un article.
     return titled[:1].upper() + titled[1:]
 
 
-def _detect_requested_regions(user_criteria: dict) -> set[str]:
-    """
-    Détecte les régions explicitement demandées.
+def _criteria_keys(user_criteria: dict[str, Any]) -> set[str]:
+    """Retourne les clés de critères utilisateur."""
+    criteres = user_criteria.get("criteres", {})
+    return set(criteres.keys()) if isinstance(criteres, dict) else set()
 
-    On lit plusieurs champs car `preferences_texte` peut être résumé par le LLM
-    et perdre une information importante comme "Bretagne ou Sud".
-    """
-    requested_from_rules = user_criteria.get("regions_demandees") or []
-    requested = {
-        str(region)
-        for region in requested_from_rules
-        if region
-    }
 
-    text = " ".join(
+def _wants_criterion(user_criteria: dict[str, Any], criterion_key: str) -> bool:
+    """Indique si un critère a été explicitement retenu pour le scoring."""
+    return criterion_key in _criteria_keys(user_criteria)
+
+
+def _combined_user_text(user_criteria: dict[str, Any]) -> str:
+    """Concatène tous les textes disponibles décrivant la demande utilisateur."""
+    return " ".join(
         str(user_criteria.get(key, ""))
         for key in [
             "preferences_texte",
@@ -296,6 +305,39 @@ def _detect_requested_regions(user_criteria: dict) -> set[str]:
             "message",
         ]
     ).lower()
+
+
+def _get_user_notes(user_criteria: dict[str, Any]) -> list[str]:
+    """
+    Récupère les notes déjà produites par les agents amont.
+
+    Ces notes peuvent correspondre à :
+    - des critères non disponibles ;
+    - des critères pris en compte indirectement ;
+    - des limites méthodologiques spécifiques à la demande.
+    """
+    notes = user_criteria.get("notes") or user_criteria.get("limitations") or []
+
+    if isinstance(notes, str):
+        return [notes]
+
+    if isinstance(notes, list):
+        return [str(note) for note in notes if note]
+
+    return []
+
+
+def _detect_requested_regions(user_criteria: dict[str, Any]) -> set[str]:
+    """
+    Détecte les régions explicitement demandées.
+
+    On évite de transformer une ville de référence en région demandée.
+    Exemple : "proche de Paris" n'est pas forcément une demande "Île-de-France".
+    """
+    requested_from_rules = user_criteria.get("regions_demandees") or []
+    requested = {str(region) for region in requested_from_rules if region}
+
+    text = _combined_user_text(user_criteria)
 
     region_aliases = {
         "Bretagne": ["bretagne", "breton", "bretonne"],
@@ -318,7 +360,7 @@ def _detect_requested_regions(user_criteria: dict) -> set[str]:
             "rhone-alpes",
             "rhône-alpes",
         ],
-        "Île-de-France": ["île-de-france", "ile-de-france", "ile de france", "paris"],
+        "Île-de-France": ["île-de-france", "ile-de-france", "ile de france"],
         "Grand Est": ["grand est"],
         "Hauts-de-France": ["hauts-de-france", "hauts de france"],
         "Centre-Val de Loire": ["centre-val de loire", "centre val de loire"],
@@ -330,8 +372,6 @@ def _detect_requested_regions(user_criteria: dict) -> set[str]:
         if any(alias in text for alias in aliases):
             requested.add(region)
 
-    # "Sud" est large : si l'utilisateur dit "Bretagne ou Sud", on veut surtout
-    # expliquer l'absence de Bretagne si le top est dominé par PACA/Occitanie.
     if "sud" in text:
         requested.add("Provence-Alpes-Côte d'Azur")
         requested.add("Occitanie")
@@ -339,14 +379,8 @@ def _detect_requested_regions(user_criteria: dict) -> set[str]:
     return requested
 
 
-def _build_region_coverage_note(top_cities: list[dict], user_criteria: dict) -> str:
-    """
-    Explique si une région explicitement demandée n'apparaît pas dans le TOP 10.
-
-    Exemple :
-        "Bretagne ou Sud" → si aucune ville bretonne dans le TOP 10,
-        on indique que la Bretagne a bien été prise en compte.
-    """
+def _build_region_coverage_note(top_cities: list[dict[str, Any]], user_criteria: dict[str, Any]) -> str:
+    """Explique si une région explicitement demandée n'apparaît pas dans le classement affiché."""
     requested_regions = _detect_requested_regions(user_criteria)
     if not requested_regions:
         return ""
@@ -361,14 +395,8 @@ def _build_region_coverage_note(top_cities: list[dict], user_criteria: dict) -> 
 
     missing = sorted(region for region in requested_regions if region not in top_regions)
 
-    # Si l'utilisateur a demandé "Sud", on ne signale pas une région sud
-    # manquante si une autre région sud est déjà représentée.
     if top_regions.intersection(southern_regions):
-        missing = [
-            region
-            for region in missing
-            if region not in southern_regions
-        ]
+        missing = [region for region in missing if region not in southern_regions]
 
     if not missing:
         return ""
@@ -381,57 +409,29 @@ def _build_region_coverage_note(top_cities: list[dict], user_criteria: dict) -> 
         verb = "ont"
 
     return (
-        f"\n\nNote : {subject} {verb} bien été prise en compte, mais n'apparaît pas dans le top 10 "
-        "car d'autres villes obtiennent de meilleurs scores sur vos critères prioritaires."
+        f"\n\nNote : {subject} {verb} bien été prise en compte, mais n'apparaît pas "
+        "dans le classement affiché car d'autres villes obtiennent de meilleurs scores "
+        "sur vos critères prioritaires."
     )
 
 
-
-def _combined_user_text(user_criteria: dict) -> str:
-    """Concatène tous les textes disponibles décrivant la demande utilisateur."""
-    return " ".join(
-        str(user_criteria.get(key, ""))
-        for key in [
-            "preferences_texte",
-            "user_input_raw",
-            "raw_user_input",
-            "original_query",
-            "message",
-        ]
-    ).lower()
-
-
-def _get_user_notes(user_criteria: dict) -> list[str]:
-    """
-    Récupère les notes déjà produites par les agents amont.
-
-    Ces notes peuvent correspondre à :
-    - des critères non disponibles ;
-    - des critères pris en compte indirectement ;
-    - des limites méthodologiques spécifiques à la demande.
-    """
-    notes = user_criteria.get("notes") or user_criteria.get("limitations") or []
-    if isinstance(notes, str):
-        return [notes]
-    if isinstance(notes, list):
-        return [str(note) for note in notes if note]
-    return []
-
-
-def _detect_unhandled_requested_criteria(user_criteria: dict) -> list[str]:
+def _detect_unhandled_requested_criteria(user_criteria: dict[str, Any]) -> list[str]:
     """
     Détecte les besoins exprimés par l'utilisateur mais non intégrés directement
     au score.
-
-    Si un besoin est indiqué dans `criteres_indirects`, il n'est pas signalé
-    comme ignoré : la note méthodologique produite par l'agent amont explique
-    comment il est approximé.
     """
     text = _combined_user_text(user_criteria)
     active = _criteria_keys(user_criteria)
+
     indirect = {
         str(item).strip().lower()
         for item in user_criteria.get("criteres_indirects", [])
+        if item
+    }
+
+    unavailable = {
+        str(item).strip().lower()
+        for item in user_criteria.get("criteres_non_disponibles", [])
         if item
     }
 
@@ -466,114 +466,43 @@ def _detect_unhandled_requested_criteria(user_criteria: dict) -> list[str]:
         {
             "label": "transports en commun",
             "indirect_labels": {"transports", "transport"},
-            "terms": [
-                "transport",
-                "transports",
-                "tram",
-                "metro",
-                "métro",
-                "bus",
-                "gare",
-                "train",
-                "ter",
-                "tgv",
-            ],
-            "accepted_keys": {
-                "score_transports",
-                "gares_pour_1000",
-                "distance_gare_km",
-            },
+            "terms": ["transport", "transports", "tram", "metro", "métro", "bus", "gare", "train", "ter", "tgv"],
+            "accepted_keys": {"transport_score"},
             "reason": "aucun critère transport fiable n'a été retenu pour cette analyse",
         },
         {
             "label": "commerces de proximité",
             "indirect_labels": {"commerces", "commerces de proximité"},
-            "terms": [
-                "commerce",
-                "commerces",
-                "centre-ville",
-                "centre ville",
-                "services de proximité",
-                "services de proximite",
-                "marché",
-                "marche",
-            ],
-            "accepted_keys": {
-                "commerces_pour_1000",
-                "supermarches_pour_1000",
-                "restaurants_score",
-            },
+            "terms": ["commerce", "commerces", "centre-ville", "centre ville", "services de proximité", "marché", "marche"],
+            "accepted_keys": {"supermarches_pour_1000", "score_restauration"},
             "reason": "ce besoin n'a pas été transformé en critère pondéré dans cette analyse",
         },
         {
             "label": "culture / loisirs",
             "indirect_labels": {"culture", "loisirs"},
-            "terms": [
-                "culture",
-                "loisirs",
-                "cinéma",
-                "cinema",
-                "théâtre",
-                "theatre",
-                "musée",
-                "musee",
-                "sport",
-                "sports",
-            ],
-            "accepted_keys": {
-                "culture_score",
-                "sports_loisirs_score",
-                "equipements_loisirs_pour_1000",
-            },
+            "terms": ["culture", "loisirs", "cinéma", "cinema", "théâtre", "theatre", "musée", "musee", "sport", "sports"],
+            "accepted_keys": {"culture_score", "sports_loisirs_score", "equipements_loisirs_pour_1000"},
             "reason": "ce besoin n'a pas été transformé en critère pondéré dans cette analyse",
         },
         {
             "label": "hôpital / accès hospitalier",
             "indirect_labels": {"hôpital", "hopital", "accès hospitalier"},
-            "terms": [
-                "hopital",
-                "hôpital",
-                "clinique",
-                "urgences",
-                "chu",
-            ],
-            "accepted_keys": {
-                "hopitaux_pour_1000",
-                "distance_hopital_km",
-                "medecins_generalistes_pour_1000",
-                "medecins_specialistes_pour_1000",
-            },
+            "terms": ["hopital", "hôpital", "clinique", "urgences", "chu"],
+            "accepted_keys": {"medecins_pour_1000", "medecins_specialistes_pour_1000", "nb_pharmacies_pour_1000"},
             "reason": "l'analyse utilise les équipements médicaux disponibles mais pas un accès hospitalier détaillé",
         },
         {
             "label": "calme",
             "indirect_labels": {"calme"},
-            "terms": [
-                "calme",
-                "tranquille",
-                "paisible",
-                "silencieux",
-            ],
-            "accepted_keys": {
-                "score_securite",
-                "criminalite_pour_1000",
-                "population",
-            },
+            "terms": ["calme", "tranquille", "paisible", "silencieux"],
+            "accepted_keys": {"score_securite", "criminalite_pour_1000"},
             "reason": "le calme est seulement approximé par la sécurité et la taille de ville",
         },
         {
             "label": "fibre",
             "indirect_labels": {"fibre", "internet", "télétravail", "teletravail"},
-            "terms": [
-                "fibre",
-                "internet",
-                "télétravail",
-                "teletravail",
-                "remote",
-            ],
-            "accepted_keys": {
-                "fibre_pct",
-            },
+            "terms": ["fibre", "internet", "télétravail", "teletravail", "remote"],
+            "accepted_keys": {"fibre_pct"},
             "reason": "aucun critère fibre n'a été retenu dans le score final",
         },
     ]
@@ -581,6 +510,8 @@ def _detect_unhandled_requested_criteria(user_criteria: dict) -> list[str]:
     notes: list[str] = []
 
     for check in checks:
+        label = str(check["label"]).lower()
+
         if not any(term in text for term in check["terms"]):
             continue
 
@@ -590,20 +521,19 @@ def _detect_unhandled_requested_criteria(user_criteria: dict) -> list[str]:
         if indirect.intersection(check.get("indirect_labels", set())):
             continue
 
-        label = check["label"]
-        reason = check["reason"]
+        if label in unavailable or unavailable.intersection(check.get("indirect_labels", set())):
+            continue
+
         notes.append(
-            f"Le besoin « {label} » a été compris, mais n'est pas utilisé directement "
-            f"dans le score final : {reason}."
+            f"Le besoin « {check['label']} » a été compris, mais n'est pas utilisé directement "
+            f"dans le score final : {check['reason']}."
         )
 
-    # Notes ajoutées explicitement par les agents amont, notamment les critères
-    # pris en compte indirectement comme "nature proche".
     notes.extend(_get_user_notes(user_criteria))
 
-    # Déduplication stable.
-    unique = []
-    seen = set()
+    unique: list[str] = []
+    seen: set[str] = set()
+
     for note in notes:
         normalized = note.strip()
         if normalized and normalized not in seen:
@@ -613,13 +543,8 @@ def _detect_unhandled_requested_criteria(user_criteria: dict) -> list[str]:
     return unique
 
 
-def _build_unhandled_criteria_note(user_criteria: dict) -> str:
-    """
-    Construit le bloc de notes sur les critères non pris en compte directement.
-
-    Le titre reste volontairement général : il couvre aussi les critères pris en
-    compte indirectement via proxy.
-    """
+def _build_unhandled_criteria_note(user_criteria: dict[str, Any]) -> str:
+    """Construit le bloc de notes sur les critères non pris en compte directement."""
     notes = _detect_unhandled_requested_criteria(user_criteria)
     if not notes:
         return ""
@@ -629,13 +554,7 @@ def _build_unhandled_criteria_note(user_criteria: dict) -> str:
 
 
 def _score_suffix_for_display(criterion_key: str, normalized_score: Any) -> str:
-    """
-    Suffixe affiché après une valeur brute dans l'analyse.
-
-    Pour la qualité de l'air, on évite :
-        Qualité de l'air : 8.0/10 (score 0.0/10)
-    car c'est contradictoire pour l'utilisateur.
-    """
+    """Suffixe affiché après une valeur brute dans l'analyse."""
     score = _safe_score(normalized_score)
 
     if criterion_key == "qualite_air_score":
@@ -648,12 +567,7 @@ def _score_suffix_for_display(criterion_key: str, normalized_score: Any) -> str:
 
 
 def _is_real_vigilance(criterion_key: str, raw_value: Any, normalized_score: Any) -> bool:
-    """
-    Détermine si un critère doit vraiment apparaître en point de vigilance.
-
-    On évite d'afficher une bonne valeur brute comme critique uniquement parce
-    qu'elle est moins bonne que les meilleures villes de l'échantillon.
-    """
+    """Détermine si un critère doit vraiment apparaître en point de vigilance."""
     score = _safe_score(normalized_score)
     raw = _raw_float(raw_value)
 
@@ -661,7 +575,6 @@ def _is_real_vigilance(criterion_key: str, raw_value: Any, normalized_score: Any
         return False
 
     if criterion_key == "qualite_air_score":
-        # 7/10 ou 8/10 est correct et ne doit pas apparaître comme critique.
         return raw is not None and raw < 7
 
     if criterion_key == "score_securite":
@@ -677,7 +590,6 @@ def _is_real_vigilance(criterion_key: str, raw_value: Any, normalized_score: Any
         return raw is not None and raw < 80
 
     if criterion_key == "prix_immo_m2":
-        # Pour le prix, la valeur brute dépend du budget : le score normalisé reste utile.
         return score < 4
 
     return score < 4
@@ -700,23 +612,8 @@ def _is_real_strength(criterion_key: str, raw_value: Any, normalized_score: Any)
     return score >= 6
 
 
-
-def _criteria_keys(user_criteria: dict) -> set[str]:
-    """Retourne les clés de critères utilisateur."""
-    criteres = user_criteria.get("criteres", {})
-    return set(criteres.keys()) if isinstance(criteres, dict) else set()
-
-
-def _wants_criterion(user_criteria: dict, criterion_key: str) -> bool:
-    """Indique si un critère a été explicitement retenu pour le scoring."""
-    return criterion_key in _criteria_keys(user_criteria)
-
-
-def _get_reference_city_name(user_criteria: dict) -> str | None:
-    """
-    Récupère le nom d'une ville de référence si l'utilisateur a demandé
-    une proximité géographique, par exemple "proche de Lyon".
-    """
+def _get_reference_city_name(user_criteria: dict[str, Any]) -> str | None:
+    """Récupère le nom d'une ville de référence si disponible."""
     candidates = [
         user_criteria.get("ville_reference"),
         user_criteria.get("reference_city"),
@@ -743,14 +640,8 @@ def _get_reference_city_name(user_criteria: dict) -> str | None:
     return None
 
 
-def _get_reference_distance(city: dict) -> tuple[str | None, float | None]:
-    """
-    Récupère une distance à une ville de référence si elle est présente
-    dans les données ville.
-
-    Plusieurs noms de clés sont supportés pour rester compatible avec les
-    agents existants.
-    """
+def _get_reference_distance(city: dict[str, Any]) -> tuple[str | None, float | None]:
+    """Récupère une distance à une ville de référence si elle est présente."""
     name_candidates = [
         city.get("reference_city"),
         city.get("reference_city_name"),
@@ -772,45 +663,42 @@ def _get_reference_distance(city: dict) -> tuple[str | None, float | None]:
     for value in distance_candidates:
         try:
             if value is not None:
-                distance = float(value)
-                break
+                candidate = float(value)
+                if math.isfinite(candidate):
+                    distance = candidate
+                    break
         except (TypeError, ValueError):
             continue
 
     return name, distance
 
 
-def _should_show_sea_distance(user_criteria: dict) -> bool:
+def _should_show_sea_distance(user_criteria: dict[str, Any]) -> bool:
     """Affiche la distance à la mer seulement si elle est pertinente."""
     if _wants_criterion(user_criteria, "distance_mer_km"):
         return True
 
-    text = str(user_criteria.get("preferences_texte", "")).lower()
-    return any(
-        word in text
-        for word in ["mer", "littoral", "océan", "ocean", "côte", "cote", "bord de mer"]
-    )
+    text = _combined_user_text(user_criteria)
+    return any(word in text for word in ["mer", "littoral", "océan", "ocean", "côte", "cote", "bord de mer"])
 
 
-def _should_show_mountain_distance(user_criteria: dict) -> bool:
+def _should_show_mountain_distance(user_criteria: dict[str, Any]) -> bool:
     """Affiche la distance à la montagne seulement si elle est pertinente."""
     if _wants_criterion(user_criteria, "distance_montagne_km"):
         return True
 
-    text = str(user_criteria.get("preferences_texte", "")).lower()
+    text = _combined_user_text(user_criteria)
     return any(word in text for word in ["montagne", "alpes", "pyrénées", "pyrenees"])
 
 
 def _append_reference_distance_if_available(
     details: list[str],
-    best: dict,
-    user_criteria: dict,
+    best: dict[str, Any],
+    user_criteria: dict[str, Any],
 ) -> None:
     """Ajoute la distance à la ville de référence si disponible."""
     reference_name_from_city, distance = _get_reference_distance(best)
-    reference_name = _smart_title_place(
-        reference_name_from_city or _get_reference_city_name(user_criteria)
-    )
+    reference_name = _smart_title_place(reference_name_from_city or _get_reference_city_name(user_criteria))
 
     if reference_name and distance is not None:
         details.append(f"à **{distance:.0f} km de {reference_name}**")
@@ -820,8 +708,8 @@ def _append_reference_distance_if_available(
 # Sections Markdown
 # ─────────────────────────────────────────────────────────────────────────────
 def build_resume_executif(
-    top_cities: list[dict],
-    user_criteria: dict,
+    top_cities: list[dict[str, Any]],
+    user_criteria: dict[str, Any],
     candidate_count: int | None = None,
 ) -> str:
     """Génère un résumé exécutif en langage naturel."""
@@ -842,49 +730,54 @@ def build_resume_executif(
         for key, _ in top_criteres
     ) or "vos critères"
 
-    details_best = []
+    details_best: list[str] = []
 
     _append_reference_distance_if_available(details_best, best, user_criteria)
 
     if _should_show_sea_distance(user_criteria) and best.get("distance_mer_km") is not None:
-        details_best.append(f"à **{best['distance_mer_km']:.0f} km de la mer**")
+        details_best.append(f"à **{float(best['distance_mer_km']):.0f} km de la mer**")
 
     if _should_show_mountain_distance(user_criteria) and best.get("distance_montagne_km") is not None:
-        details_best.append(f"à **{best['distance_montagne_km']:.0f} km de la montagne**")
+        details_best.append(f"à **{float(best['distance_montagne_km']):.0f} km de la montagne**")
 
     if best.get("prix_immo_m2") is not None:
-        details_best.append(f"prix immobilier moyen **{best['prix_immo_m2']:,.0f} €/m²**")
+        details_best.append(f"prix immobilier moyen **{float(best['prix_immo_m2']):,.0f} €/m²**")
 
     if (
         best.get("ecoles_pour_1000_enfants") is not None
         and _wants_criterion(user_criteria, "ecoles_pour_1000_enfants")
     ):
-        details_best.append(f"écoles primaires **{best['ecoles_pour_1000_enfants']:.2f} ‰**")
+        details_best.append(f"écoles primaires **{float(best['ecoles_pour_1000_enfants']):.2f} ‰**")
 
     if best.get("creches_pour_1000") is not None and _wants_criterion(user_criteria, "creches_pour_1000"):
-        details_best.append(f"crèches **{best['creches_pour_1000']:.2f} ‰**")
+        details_best.append(f"crèches **{float(best['creches_pour_1000']):.2f} ‰**")
 
     if best.get("taux_chomage") is not None and _wants_criterion(user_criteria, "taux_chomage"):
-        details_best.append(f"taux de chômage **{best['taux_chomage']:.1f}%**")
+        details_best.append(f"taux de chômage **{float(best['taux_chomage']):.1f}%**")
 
     if best.get("score_securite") is not None and _wants_criterion(user_criteria, "score_securite"):
-        details_best.append(f"score sécurité **{best['score_securite']:.1f}/10**")
+        details_best.append(f"score sécurité **{float(best['score_securite']):.1f}/10**")
 
     if best.get("qualite_air_score") is not None and _wants_criterion(user_criteria, "qualite_air_score"):
-        details_best.append(f"qualité de l'air **{best['qualite_air_score']:.1f}/10**")
+        details_best.append(f"qualité de l'air **{float(best['qualite_air_score']):.1f}/10**")
 
     details_str = " — ".join(details_best)
     region_coverage_note = _build_region_coverage_note(top_cities, user_criteria)
     unhandled_criteria_note = _build_unhandled_criteria_note(user_criteria)
+
+    best_name = best.get("nom", "?")
+    best_region = best.get("region", "?")
+    best_score = _fmt_number(best.get("total_score"), 1)
+
+    details_paragraph = f"\n{details_str}\n" if details_str else "\n"
 
     return f"""Sur la base de votre profil **{profil}**, {candidate_count} villes candidates ont été analysées,
 dont les {display_count} meilleures sont présentées ci-dessous.
 
 Le classement tient compte de vos critères prioritaires : **{criteres_texte}**.
 
-**La ville recommandée en premier choix est {best['nom']}** ({best.get('region', '?')})
-avec un score global de **{best['total_score']:.1f}/100**.
-{details_str}
+**La ville recommandée en premier choix est {best_name}** ({best_region})
+avec un score global de **{best_score}/100**.{details_paragraph}
 
 {pref_texte if pref_texte else ''}{region_coverage_note}{unhandled_criteria_note}
 
@@ -893,25 +786,22 @@ Certains filtres peuvent être relâchés progressivement lorsqu'ils sont trop r
 Consultez l'analyse détaillée ci-dessous pour affiner votre choix."""
 
 
-def build_tableau_villes(top_cities: list[dict]) -> str:
+def build_tableau_villes(top_cities: list[dict[str, Any]]) -> str:
     """Génère les lignes du tableau Markdown des villes."""
     rows = []
 
     for city in top_cities:
-        chomage = city.get("taux_chomage")
-        prix = city.get("prix_immo_m2")
-
         rows.append(
             f"| #{city.get('rank', '?')} | **{city.get('nom', '?')}** | {city.get('region', '?')} | "
-            f"**{city.get('total_score', 0):.1f}/100** | {city.get('population', 0):,} | "
-            f"{_fmt_number(chomage, 1, '%')} | "
-            f"{_fmt_number(prix, 0, ' €/m²')} |"
+            f"**{_fmt_number(city.get('total_score'), 1)}/100** | {_fmt_number(city.get('population'), 0)} | "
+            f"{_fmt_number(city.get('taux_chomage'), 1, '%')} | "
+            f"{_fmt_number(city.get('prix_immo_m2'), 0, ' €/m²')} |"
         )
 
     return "\n".join(rows)
 
 
-def build_analyse_ville(city: dict) -> str:
+def build_analyse_ville(city: dict[str, Any]) -> str:
     """Génère l'analyse détaillée d'une ville."""
     score_details = city.get("score_details", {})
 
@@ -953,15 +843,11 @@ def build_analyse_ville(city: dict) -> str:
     )
 
     web_insights = city.get("web_insights", "")
-    web_section = (
-        f"\n**Informations récentes :** {web_insights[:300]}..."
-        if web_insights
-        else ""
-    )
+    web_section = f"\n**Informations récentes :** {str(web_insights)[:300]}..." if web_insights else ""
 
     return f"""### #{city.get('rank', '?')} — {city.get('nom', '?')} ({city.get('region', '?')})
 
-> **Score global : {city.get('total_score', 0):.1f}/100** | Population : {city.get('population', 0):,} hab.
+> **Score global : {_fmt_number(city.get('total_score'), 1)}/100** | Population : {_fmt_number(city.get('population'), 0)} hab.
 
 **Points forts :**
 {forts_text if forts_text else "  - Performances globalement équilibrées"}
@@ -974,16 +860,25 @@ def build_analyse_ville(city: dict) -> str:
 """
 
 
-def build_tableau_criteres(user_criteria: dict) -> str:
+def build_tableau_criteres(user_criteria: dict[str, Any]) -> str:
     """Génère le tableau Markdown des critères utilisateur."""
     criteres = user_criteria.get("criteres", {})
 
-    return "\n".join(
-        f"| {AVAILABLE_CRITERIA.get(key, {}).get('label', key)} | "
-        f"{'⭐' * int(weight)} ({int(weight)}/5) | "
-        f"{AVAILABLE_CRITERIA.get(key, {}).get('description', '?')} |"
-        for key, weight in sorted(criteres.items(), key=lambda item: item[1], reverse=True)
-    )
+    rows = []
+
+    for key, weight in sorted(criteres.items(), key=lambda item: item[1], reverse=True):
+        try:
+            weight_int = max(1, min(5, int(float(weight))))
+        except (TypeError, ValueError):
+            weight_int = 3
+
+        rows.append(
+            f"| {AVAILABLE_CRITERIA.get(key, {}).get('label', key)} | "
+            f"{'⭐' * weight_int} ({weight_int}/5) | "
+            f"{AVAILABLE_CRITERIA.get(key, {}).get('description', '?')} |"
+        )
+
+    return "\n".join(rows)
 
 
 def generate_markdown_report(state: CityMatchState) -> str:
@@ -995,7 +890,7 @@ def generate_markdown_report(state: CityMatchState) -> str:
 
     return MARKDOWN_TEMPLATE.format(
         date=_now_paris().strftime("%d/%m/%Y à %H:%M"),
-        session_id=session_id[:8] + "...",
+        session_id=str(session_id)[:8] + "...",
         profil=user_criteria.get("profil", "Non défini"),
         resume_executif=build_resume_executif(
             top_cities=top_cities,
@@ -1011,7 +906,7 @@ def generate_markdown_report(state: CityMatchState) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Graphique radar
 # ─────────────────────────────────────────────────────────────────────────────
-def generate_radar_chart(top_cities: list[dict], user_criteria: dict) -> bytes | None:
+def generate_radar_chart(top_cities: list[dict[str, Any]], user_criteria: dict[str, Any]) -> bytes | None:
     """Génère un graphique radar comparant les TOP 5 villes en PNG."""
     try:
         import matplotlib
@@ -1019,17 +914,13 @@ def generate_radar_chart(top_cities: list[dict], user_criteria: dict) -> bytes |
         matplotlib.use("Agg")
 
         import matplotlib.pyplot as plt
-        import numpy as np  # noqa: F401
 
         criteres = user_criteria.get("criteres", {})
         if not criteres or not top_cities:
             return None
 
         top_criteres = sorted(criteres.items(), key=lambda item: item[1], reverse=True)[:7]
-        labels = [
-            AVAILABLE_CRITERIA.get(key, {}).get("label", key)[:20]
-            for key, _ in top_criteres
-        ]
+        labels = [AVAILABLE_CRITERIA.get(key, {}).get("label", key)[:20] for key, _ in top_criteres]
 
         n_labels = len(labels)
         if n_labels < 3:
@@ -1044,17 +935,17 @@ def generate_radar_chart(top_cities: list[dict], user_criteria: dict) -> bytes |
         ax.set_facecolor("#f8fafc")
         fig.patch.set_facecolor("white")
 
-        for idx, city in enumerate(top_cities[:5]):
+        for index, city in enumerate(top_cities[:5]):
             details = city.get("score_details", {})
             values = []
 
             for key, _ in top_criteres:
                 detail = details.get(key, {})
                 value = detail.get("normalized_score", 5.0) if detail else 5.0
-                values.append(float(value))
+                values.append(float(value or 5.0))
 
             values += values[:1]
-            color = colors_list[idx % len(colors_list)]
+            color = colors_list[index % len(colors_list)]
 
             ax.plot(
                 angles,
@@ -1062,7 +953,7 @@ def generate_radar_chart(top_cities: list[dict], user_criteria: dict) -> bytes |
                 "o-",
                 linewidth=2,
                 color=color,
-                label=city.get("nom", f"Ville {idx + 1}"),
+                label=city.get("nom", f"Ville {index + 1}"),
                 alpha=0.9,
             )
             ax.fill(angles, values, alpha=0.08, color=color)
@@ -1091,25 +982,26 @@ def generate_radar_chart(top_cities: list[dict], user_criteria: dict) -> bytes |
 
         plt.tight_layout()
 
-        buf = io.BytesIO()
+        buffer = io.BytesIO()
         fig.savefig(
-            buf,
+            buffer,
             format="png",
             dpi=150,
             bbox_inches="tight",
             facecolor="white",
             edgecolor="none",
         )
-        buf.seek(0)
-        png_bytes = buf.read()
+        buffer.seek(0)
+        png_bytes = buffer.read()
         plt.close(fig)
+
         return png_bytes
 
     except ImportError:
-        console.print("[yellow]⚠️  matplotlib non disponible — radar ignoré[/yellow]")
+        logger.info("matplotlib non disponible : radar ignoré")
         return None
-    except Exception as exc:
-        console.print(f"[yellow]⚠️  Erreur radar : {exc}[/yellow]")
+    except Exception:
+        logger.exception("Erreur pendant la génération du graphique radar")
         return None
 
 
@@ -1123,7 +1015,7 @@ def _pdf_paragraph(text: str, style):
     return Paragraph(_markdown_inline_to_reportlab(_plain_text_for_pdf(text)), style)
 
 
-def _add_pdf_city_table(story: list, top_cities: list[dict], styles: dict) -> None:
+def _add_pdf_city_table(story: list[Any], top_cities: list[dict[str, Any]], styles: dict[str, Any]) -> None:
     """Ajoute un vrai tableau de classement au PDF."""
     from reportlab.lib import colors
     from reportlab.lib.units import cm
@@ -1146,7 +1038,7 @@ def _add_pdf_city_table(story: list, top_cities: list[dict], styles: dict) -> No
                 f"#{city.get('rank', '?')}",
                 Paragraph(_escape_reportlab(city.get("nom", "?")), styles["table_cell"]),
                 Paragraph(_escape_reportlab(city.get("region", "?")), styles["table_cell"]),
-                f"{city.get('total_score', 0):.1f}/100",
+                f"{_fmt_number(city.get('total_score'), 1)}/100",
                 _fmt_number(city.get("population"), 0),
                 _fmt_number(city.get("prix_immo_m2"), 0, " €"),
             ]
@@ -1175,7 +1067,7 @@ def _add_pdf_city_table(story: list, top_cities: list[dict], styles: dict) -> No
     story.append(Spacer(1, 0.4 * cm))
 
 
-def _add_pdf_criteria_table(story: list, user_criteria: dict, styles: dict) -> None:
+def _add_pdf_criteria_table(story: list[Any], user_criteria: dict[str, Any], styles: dict[str, Any]) -> None:
     """Ajoute un vrai tableau des critères au PDF."""
     from reportlab.lib import colors
     from reportlab.lib.units import cm
@@ -1196,10 +1088,16 @@ def _add_pdf_criteria_table(story: list, user_criteria: dict, styles: dict) -> N
 
     for key, weight in sorted(criteres.items(), key=lambda item: item[1], reverse=True):
         meta = AVAILABLE_CRITERIA.get(key, {})
+
+        try:
+            weight_int = max(1, min(5, int(float(weight))))
+        except (TypeError, ValueError):
+            weight_int = 3
+
         data.append(
             [
                 Paragraph(_escape_reportlab(meta.get("label", key)), styles["table_cell"]),
-                f"{int(weight)}/5",
+                f"{weight_int}/5",
                 Paragraph(_escape_reportlab(meta.get("description", "?")), styles["table_cell"]),
             ]
         )
@@ -1227,7 +1125,7 @@ def _add_pdf_criteria_table(story: list, user_criteria: dict, styles: dict) -> N
     story.append(Spacer(1, 0.4 * cm))
 
 
-def _add_pdf_sources_and_limits(story: list, styles: dict) -> None:
+def _add_pdf_sources_and_limits(story: list[Any], styles: dict[str, Any]) -> None:
     """Ajoute les sources et limites au PDF."""
     story.append(_pdf_paragraph("Sources de Données", styles["h1"]))
 
@@ -1239,10 +1137,12 @@ def _add_pdf_sources_and_limits(story: list, styles: dict) -> None:
         "ARCEP : couverture fibre par commune",
         "ATMO / associations régionales agréées : qualité de l'air quand disponible",
     ]
+
     for source in sources:
         story.append(_pdf_paragraph(f"• {source}", styles["body"]))
 
     story.append(_pdf_paragraph("Limites & Avertissements", styles["h1"]))
+
     limits = [
         "Les données publiques peuvent avoir un décalage de 1 à 2 ans selon les sources.",
         "Les scores sont relatifs à l'échantillon de villes candidates.",
@@ -1250,8 +1150,58 @@ def _add_pdf_sources_and_limits(story: list, styles: dict) -> None:
         "Ce rapport est une aide à la décision, pas une vérité absolue.",
         "Toujours compléter par une visite sur place, une recherche immobilière réelle et l'analyse des transports quotidiens.",
     ]
+
     for limit in limits:
         story.append(_pdf_paragraph(f"• {limit}", styles["body"]))
+
+
+def _extract_markdown_block(markdown_text: str, start_label: str, end_label: str) -> str:
+    """Extrait un bloc simple entre deux labels Markdown."""
+    start = markdown_text.find(start_label)
+    if start == -1:
+        return ""
+
+    start += len(start_label)
+    end = markdown_text.find(end_label, start)
+    if end == -1:
+        end = len(markdown_text)
+
+    return markdown_text[start:end].strip()
+
+
+def _add_pdf_bullets(story: list[Any], block: str, style) -> None:
+    """Ajoute des lignes bullet au PDF en nettoyant Markdown et emojis."""
+    if not block.strip():
+        story.append(_pdf_paragraph("• Aucun élément à signaler", style))
+        return
+
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    added = False
+
+    for line in lines:
+        clean = line.strip()
+        clean = re.sub(r"^[-•]\s*", "", clean)
+        clean = re.sub(r"^\s*-\s*", "", clean)
+        clean = _plain_text_for_pdf(clean).strip()
+
+        title_like = clean.strip("* ").lower()
+        if title_like in {
+            "points forts",
+            "points forts :",
+            "points de vigilance",
+            "points de vigilance :",
+        }:
+            continue
+
+        if clean in {"**", "*", ":", ":**"}:
+            continue
+
+        if clean:
+            story.append(_pdf_paragraph(f"• {clean}", style))
+            added = True
+
+    if not added:
+        story.append(_pdf_paragraph("• Aucun élément à signaler", style))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1260,10 +1210,13 @@ def _add_pdf_sources_and_limits(story: list, styles: dict) -> None:
 def generate_pdf_report(
     markdown_content: str,
     output_path: Path,
-    top_cities: list | None = None,
-    user_criteria: dict | None = None,
+    top_cities: list[dict[str, Any]] | None = None,
+    user_criteria: dict[str, Any] | None = None,
 ) -> bool:
     """Convertit le rapport en PDF propre avec ReportLab."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -1344,8 +1297,8 @@ def generate_pdf_report(
             radar_png = generate_radar_chart(top_cities, user_criteria)
             if radar_png:
                 story.append(_pdf_paragraph("Comparaison radar des TOP villes", styles["h1"]))
-                radar_buf = io.BytesIO(radar_png)
-                story.append(RLImage(radar_buf, width=12 * cm, height=10 * cm))
+                radar_buffer = io.BytesIO(radar_png)
+                story.append(RLImage(radar_buffer, width=12 * cm, height=10 * cm))
                 story.append(
                     _pdf_paragraph(
                         "Axes = critères pondérés par l'utilisateur. "
@@ -1355,18 +1308,14 @@ def generate_pdf_report(
                 )
                 story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e2e8f0")))
 
-        # PDF structuré directement depuis les données, pas en reconvertissant
-        # tout le Markdown. Cela évite le doublon de titre et les tableaux cassés.
         story.append(_pdf_paragraph("Résumé Exécutif", styles["h1"]))
+
         resume_match = re.search(
-            r"## 📋 Résumé Exécutif\s+(.*?)\s+---\s+## 🏆",
+            r"##\s+.*?Résumé Exécutif\s+(.*?)\s+---\s+##\s+.*?Classement",
             markdown_content,
             flags=re.DOTALL,
         )
-        if resume_match:
-            resume_text = resume_match.group(1).strip()
-        else:
-            resume_text = "Rapport généré selon les critères utilisateur."
+        resume_text = resume_match.group(1).strip() if resume_match else "Rapport généré selon les critères utilisateur."
 
         for paragraph in resume_text.split("\n\n"):
             if paragraph.strip():
@@ -1385,21 +1334,21 @@ def generate_pdf_report(
             )
             story.append(
                 _pdf_paragraph(
-                    f"Score global : {city.get('total_score', 0):.1f}/100 | "
+                    f"Score global : {_fmt_number(city.get('total_score'), 1)}/100 | "
                     f"Population : {_fmt_number(city.get('population'), 0)} hab.",
                     styles["body"],
                 )
             )
 
-            analysis_md = build_analyse_ville(city)
-            forts = _extract_markdown_block(analysis_md, "Points forts :", "Points de vigilance :")
-            vigilances = _extract_markdown_block(analysis_md, "Points de vigilance :", "---")
+            analysis_markdown = build_analyse_ville(city)
+            strengths = _extract_markdown_block(analysis_markdown, "Points forts :", "Points de vigilance :")
+            warnings = _extract_markdown_block(analysis_markdown, "Points de vigilance :", "---")
 
             story.append(_pdf_paragraph("Points forts :", styles["body"]))
-            _add_pdf_bullets(story, forts, styles["body"])
+            _add_pdf_bullets(story, strengths, styles["body"])
 
             story.append(_pdf_paragraph("Points de vigilance :", styles["body"]))
-            _add_pdf_bullets(story, vigilances, styles["body"])
+            _add_pdf_bullets(story, warnings, styles["body"])
 
         story.append(_pdf_paragraph("Critères Utilisés", styles["h1"]))
         _add_pdf_criteria_table(story, user_criteria, styles)
@@ -1409,141 +1358,156 @@ def generate_pdf_report(
         doc.build(story)
         return True
 
-    except Exception as exc:
-        console.print(f"[yellow]⚠️  Erreur génération PDF : {exc}[/yellow]")
+    except Exception:
+        logger.exception("Erreur pendant la génération du PDF")
 
-        md_path = output_path.with_suffix(".md")
-        with open(md_path, "w", encoding="utf-8") as handle:
+        markdown_fallback_path = output_path.with_suffix(".md")
+        with open(markdown_fallback_path, "w", encoding="utf-8") as handle:
             handle.write(markdown_content)
 
-        console.print(f"[dim]Rapport sauvegardé en Markdown : {md_path}[/dim]")
         return False
 
 
-def _extract_markdown_block(markdown_text: str, start_label: str, end_label: str) -> str:
-    """Extrait un bloc simple entre deux labels Markdown."""
-    start = markdown_text.find(start_label)
-    if start == -1:
-        return ""
-
-    start += len(start_label)
-    end = markdown_text.find(end_label, start)
-    if end == -1:
-        end = len(markdown_text)
-
-    return markdown_text[start:end].strip()
+def _safe_report_filename(session_id: str, timestamp: str) -> str:
+    """Construit un nom de fichier sûr pour le rapport."""
+    session_short = re.sub(r"[^a-zA-Z0-9_-]", "_", str(session_id))[:8] or "unknown"
+    return f"citymatch_report_{session_short}_{timestamp}"
 
 
-def _add_pdf_bullets(story: list, block: str, style) -> None:
-    """Ajoute des lignes bullet au PDF en nettoyant Markdown et emojis."""
-    if not block.strip():
-        story.append(_pdf_paragraph("• Aucun élément à signaler", style))
+def _save_search_session_report(
+    db,
+    session_id: str,
+    top_cities: list[dict[str, Any]],
+    report_path: str,
+) -> None:
+    """Met à jour la session métier avec le rapport généré."""
+    session = db.query(SearchSession).filter_by(id=session_id).first()
+
+    if not session:
         return
 
-    lines = [line.strip() for line in block.splitlines() if line.strip()]
-    added = False
-
-    for line in lines:
-        clean = line.strip()
-
-        # Retire les préfixes de liste Markdown.
-        clean = re.sub(r"^[-•]\s*", "", clean)
-        clean = re.sub(r"^\s*-\s*", "", clean)
-
-        # Retire les emojis/icônes qui deviennent des carrés en PDF.
-        clean = _plain_text_for_pdf(clean).strip()
-
-        # Supprime les restes de titres de section Markdown.
-        title_like = clean.strip("* ").lower()
-        if title_like in {
-            "points forts",
-            "points forts :",
-            "points de vigilance",
-            "points de vigilance :",
-        }:
-            continue
-
-        # Cas parasite issu de **Points forts :** / **Points de vigilance :**
-        # après extraction de bloc.
-        if clean in {"**", "*", ":", ":**"}:
-            continue
-
-        if clean:
-            story.append(_pdf_paragraph(f"• {clean}", style))
-            added = True
-
-    if not added:
-        story.append(_pdf_paragraph("• Aucun élément à signaler", style))
+    session.top_cities = [
+        {
+            "nom": city.get("nom"),
+            "score": city.get("total_score"),
+            "rank": city.get("rank"),
+        }
+        for city in top_cities
+    ]
+    session.report_path = report_path
+    session.state = "completed"
 
 
 def run_report_agent(state: CityMatchState) -> CityMatchState:
     """Nœud LangGraph : génère le rapport Markdown/PDF."""
-    start_time = time.time()
-    console.print("\n[bold cyan]📄 ReportAgent activé[/bold cyan]")
+    start_time = time.perf_counter()
 
-    if not state.get("top_cities"):
-        console.print("[yellow]⚠️  Aucune ville top pour le rapport.[/yellow]")
-        state["analysis_complete"] = True
-        return state
-
-    markdown_content = generate_markdown_report(state)
-    state["report_markdown"] = markdown_content
-
-    timestamp = _now_paris().strftime("%Y%m%d_%H%M%S")
-    session_short = state.get("session_id", "unknown")[:8]
-    filename = f"citymatch_report_{session_short}_{timestamp}"
-
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    md_path = REPORTS_DIR / f"{filename}.md"
-    with open(md_path, "w", encoding="utf-8") as handle:
-        handle.write(markdown_content)
-
-    console.print(f"[green]✅ Rapport Markdown : {md_path}[/green]")
-
-    pdf_path = REPORTS_DIR / f"{filename}.pdf"
-    pdf_success = generate_pdf_report(
-        markdown_content=markdown_content,
-        output_path=pdf_path,
-        top_cities=state.get("top_cities", []),
-        user_criteria=state.get("user_criteria", {}),
-    )
-
-    if pdf_success:
-        state["report_pdf_path"] = str(pdf_path)
-        console.print(f"[green]✅ Rapport PDF : {pdf_path}[/green]")
-    else:
-        state["report_pdf_path"] = str(md_path)
-
-    from db.models import SearchSession, SessionLocal
+    session_id = state.get("session_id", "unknown")
+    top_cities = state.get("top_cities", []) or []
 
     db = SessionLocal()
+
+    log_entry = AgentLog(
+        session_id=session_id,
+        agent_name=REPORT_AGENT_NAME,
+        action=REPORT_AGENT_ACTION,
+        input_data={
+            "top_cities_count": len(top_cities),
+        },
+        success=False,
+    )
+
     try:
-        session = db.query(SearchSession).filter_by(id=state.get("session_id")).first()
-        if session:
-            session.top_cities = [
-                {
-                    "nom": city.get("nom"),
-                    "score": city.get("total_score"),
-                    "rank": city.get("rank"),
-                }
-                for city in state.get("top_cities", [])
-            ]
-            session.report_path = state["report_pdf_path"]
-            session.state = "completed"
-            db.commit()
+        if not top_cities:
+            state["analysis_complete"] = True
+            state["report_markdown"] = ""
+            state["report_pdf_path"] = ""
+
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            log_entry.output_data = {"report_generated": False, "reason": "no_top_cities"}
+            log_entry.duration_ms = duration_ms
+            log_entry.success = True
+
+            _append_agent_trace(state, f"{REPORT_AGENT_NAME}: aucune ville top pour le rapport")
+            return state
+
+        markdown_content = generate_markdown_report(state)
+        state["report_markdown"] = markdown_content
+
+        timestamp = _now_paris().strftime("%Y%m%d_%H%M%S")
+        filename = _safe_report_filename(str(session_id), timestamp)
+
+        reports_dir = Path(REPORTS_DIR)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        markdown_path = reports_dir / f"{filename}.md"
+        with open(markdown_path, "w", encoding="utf-8") as handle:
+            handle.write(markdown_content)
+
+        pdf_path = reports_dir / f"{filename}.pdf"
+        pdf_success = generate_pdf_report(
+            markdown_content=markdown_content,
+            output_path=pdf_path,
+            top_cities=top_cities,
+            user_criteria=state.get("user_criteria", {}),
+        )
+
+        report_path = str(pdf_path if pdf_success else markdown_path)
+        state["report_pdf_path"] = report_path
+
+        _save_search_session_report(
+            db=db,
+            session_id=session_id,
+            top_cities=top_cities,
+            report_path=report_path,
+        )
+
+        state["analysis_complete"] = True
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        log_entry.output_data = {
+            "report_generated": True,
+            "markdown_path": str(markdown_path),
+            "pdf_path": str(pdf_path) if pdf_success else None,
+            "final_report_path": report_path,
+            "pdf_success": pdf_success,
+        }
+        log_entry.duration_ms = duration_ms
+        log_entry.success = True
+
+        _append_agent_trace(
+            state,
+            f"{REPORT_AGENT_NAME}: rapport généré en {duration_ms} ms → {filename}",
+        )
+
     except Exception as exc:
-        console.print(f"[yellow]⚠️  Erreur sauvegarde session : {exc}[/yellow]")
+        db.rollback()
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        logger.exception("Erreur pendant l'exécution du ReportAgent")
+
+        state["error"] = f"{REPORT_AGENT_NAME}: {exc}"
+        state["analysis_complete"] = True
+
+        log_entry.duration_ms = duration_ms
+        log_entry.success = False
+        log_entry.error_message = str(exc)
+
+        _append_agent_trace(
+            state,
+            f"{REPORT_AGENT_NAME}: erreur après {duration_ms} ms",
+        )
+
     finally:
-        db.close()
-
-    state["analysis_complete"] = True
-
-    duration_ms = int((time.time() - start_time) * 1000)
-    console.print(f"[green]✅ Rapport généré en {duration_ms}ms[/green]")
-
-    trace = list(state.get("agent_trace", []))
-    trace.append(f"ReportAgent: rapport généré en {duration_ms}ms → {filename}")
-    state["agent_trace"] = trace
+        try:
+            db.add(log_entry)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Impossible d'enregistrer le log du ReportAgent")
+        finally:
+            db.close()
 
     return state

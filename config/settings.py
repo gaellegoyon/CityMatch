@@ -1,70 +1,175 @@
 """
 config/settings.py
-─────────────────
+──────────────────
 Configuration centralisée du projet CityMatch.
-Charge les variables d'environnement et expose les constantes globales.
+
+Charge les variables d'environnement et expose les constantes globales :
+- chemins projet ;
+- clés API ;
+- modèles LLM / embeddings ;
+- base SQLite ;
+- critères disponibles ;
+- sources open data.
 """
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Final
 
 from dotenv import load_dotenv
 
 
-# ─── Chemins du projet ────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-DB_DIR = BASE_DIR / "db"
-VECTORSTORE_DIR = BASE_DIR / "vectorstore"
-REPORTS_DIR = BASE_DIR / "reports" / "output"
-PDF_DIR = DATA_DIR / "pdfs"
+# ─────────────────────────────────────────────────────────────────────────────
+# Chemins du projet
+# ─────────────────────────────────────────────────────────────────────────────
+BASE_DIR: Final[Path] = Path(__file__).resolve().parent.parent
 
-# Créer les répertoires si nécessaire
-for directory in [DATA_DIR, DB_DIR, VECTORSTORE_DIR, REPORTS_DIR, PDF_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
+DATA_DIR: Final[Path] = BASE_DIR / "data"
+DB_DIR: Final[Path] = BASE_DIR / "db"
+DOCS_DIR: Final[Path] = DATA_DIR / "docs"
+PDF_DIR: Final[Path] = DATA_DIR / "pdfs"
+VECTORSTORE_DIR: Final[Path] = BASE_DIR / "vectorstore"
+REPORTS_DIR: Final[Path] = BASE_DIR / "reports" / "output"
+
+DB_PATH: Final[Path] = DB_DIR / "cities.db"
 
 
-# ─── Chargement .env ──────────────────────────────────────────────────────────
+def ensure_project_directories() -> None:
+    """Crée les répertoires nécessaires au fonctionnement de l'application."""
+    for directory in [DATA_DIR, DB_DIR, DOCS_DIR, PDF_DIR, VECTORSTORE_DIR, REPORTS_DIR]:
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+ensure_project_directories()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chargement .env
+# ─────────────────────────────────────────────────────────────────────────────
 load_dotenv(BASE_DIR / ".env")
 
 
-# ─── Clés API ─────────────────────────────────────────────────────────────────
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers env
+# ─────────────────────────────────────────────────────────────────────────────
+def _get_env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    """Lit un entier depuis l'environnement avec valeur par défaut robuste."""
+    raw_value = os.getenv(name)
+
+    try:
+        value = int(raw_value) if raw_value not in (None, "") else default
+    except ValueError:
+        value = default
+
+    if minimum is not None:
+        value = max(minimum, value)
+
+    if maximum is not None:
+        value = min(maximum, value)
+
+    return value
 
 
-# ─── Modèles LLM ──────────────────────────────────────────────────────────────
-PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "gemini-2.0-flash-exp")
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "llama-3.3-70b-versatile")
+def _get_env_str(name: str, default: str = "") -> str:
+    """Lit une chaîne depuis l'environnement."""
+    return os.getenv(name, default).strip()
 
 
-# ─── Base de données ──────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_DIR}/cities.db")
+# ─────────────────────────────────────────────────────────────────────────────
+# Clés API
+# ─────────────────────────────────────────────────────────────────────────────
+GOOGLE_API_KEY: Final[str] = _get_env_str("GOOGLE_API_KEY")
+GROQ_API_KEY: Final[str] = _get_env_str("GROQ_API_KEY")
+TAVILY_API_KEY: Final[str] = _get_env_str("TAVILY_API_KEY")
+
+PLACEHOLDER_API_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "",
+        "your_google_api_key_here",
+        "your_groq_api_key_here",
+        "your_tavily_api_key_here",
+        "changeme",
+        "change_me",
+        "none",
+        "null",
+    }
+)
 
 
-# ─── Embeddings locaux ────────────────────────────────────────────────────────
-EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+# ─────────────────────────────────────────────────────────────────────────────
+# Modèles LLM
+# ─────────────────────────────────────────────────────────────────────────────
+# Ces constantes doivent être utilisées par les agents LLM pour éviter les
+# modèles hardcodés dans le code métier.
+GROQ_MODEL: Final[str] = _get_env_str("GROQ_MODEL", "llama-3.3-70b-versatile")
+GEMINI_MODEL: Final[str] = _get_env_str("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Compatibilité avec d'anciens imports éventuels.
+PRIMARY_MODEL: Final[str] = _get_env_str("PRIMARY_MODEL", GEMINI_MODEL)
+FALLBACK_MODEL: Final[str] = _get_env_str("FALLBACK_MODEL", GROQ_MODEL)
 
 
-# ─── Identité de l'application ────────────────────────────────────────────────
-APP_NAME = "CityMatch"
-APP_VERSION = "1.0"
+# ─────────────────────────────────────────────────────────────────────────────
+# Base de données
+# ─────────────────────────────────────────────────────────────────────────────
+DATABASE_URL: Final[str] = _get_env_str("DATABASE_URL", f"sqlite:///{DB_PATH}")
 
 
-# ─── Paramètres de l'application ──────────────────────────────────────────────
-MAX_CITIES_IN_REPORT = int(os.getenv("MAX_CITIES_IN_REPORT", "10"))
-MIN_POPULATION = 5_000
-MAX_POPULATION = 500_000
+# ─────────────────────────────────────────────────────────────────────────────
+# Embeddings locaux
+# ─────────────────────────────────────────────────────────────────────────────
+EMBEDDING_MODEL: Final[str] = _get_env_str(
+    "EMBEDDING_MODEL",
+    "paraphrase-multilingual-MiniLM-L12-v2",
+)
 
 
-# ─── Critères disponibles avec métadonnées ────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Identité de l'application
+# ─────────────────────────────────────────────────────────────────────────────
+APP_NAME: Final[str] = "CityMatch"
+APP_VERSION: Final[str] = "1.0"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paramètres de l'application
+# ─────────────────────────────────────────────────────────────────────────────
+MAX_CITIES_IN_REPORT: Final[int] = _get_env_int(
+    "MAX_CITIES_IN_REPORT",
+    default=10,
+    minimum=1,
+    maximum=50,
+)
+
+MIN_POPULATION: Final[int] = _get_env_int(
+    "MIN_POPULATION",
+    default=5_000,
+    minimum=0,
+    maximum=2_000_000,
+)
+
+MAX_POPULATION: Final[int] = _get_env_int(
+    "MAX_POPULATION",
+    default=500_000,
+    minimum=1_000,
+    maximum=2_000_000,
+)
+
+if MIN_POPULATION > MAX_POPULATION:
+    MIN_POPULATION, MAX_POPULATION = MAX_POPULATION, MIN_POPULATION
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Critères disponibles avec métadonnées
+# ─────────────────────────────────────────────────────────────────────────────
 # Important :
 # - cette liste doit rester synchronisée avec agents/common/criteria.py ;
 # - ne pas ajouter de critère sans colonne fiable en DB ou calcul fiable à la volée ;
 # - les critères supprimés volontairement ne doivent pas apparaître ici
 #   pour éviter que l'UI ou le LLM les propose.
-AVAILABLE_CRITERIA = {
+AVAILABLE_CRITERIA: Final[dict[str, dict[str, object]]] = {
     # INSEE — économie / démographie
     "revenu_median": {
         "label": "Niveau de vie médian",
@@ -303,8 +408,13 @@ AVAILABLE_CRITERIA = {
 }
 
 
-# ─── URLs Open Data ───────────────────────────────────────────────────────────
-DATA_SOURCES = {
+AVAILABLE_CRITERIA_KEYS: Final[frozenset[str]] = frozenset(AVAILABLE_CRITERIA)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# URLs Open Data
+# ─────────────────────────────────────────────────────────────────────────────
+DATA_SOURCES: Final[dict[str, str]] = {
     "bpe": "https://www.insee.fr/fr/statistiques/fichier/8217527/DS_BPE_CSV_FR.zip",
     "chomage": "https://www.data.gouv.fr/fr/datasets/r/7df61db5-6a83-4c02-92fd-c8a51f8cef44",
     "dvf": "https://files.data.gouv.fr/geo-dvf/latest/csv/",

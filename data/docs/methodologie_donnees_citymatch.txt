@@ -5,66 +5,93 @@
 CityMatch compare des villes françaises à partir de données publiques et de calculs simples.
 
 Le projet cherche à éviter :
-- les critères inventés ;
-- les scores subjectifs non sourcés ;
-- les colonnes très incomplètes ;
-- les indicateurs trop biaisés par la taille des villes.
+
+* les critères inventés ;
+* les scores subjectifs non sourcés ;
+* les colonnes très incomplètes ;
+* les indicateurs trop biaisés par la taille des villes ;
+* les recommandations opaques ou trompeuses.
+
+CityMatch privilégie les indicateurs qui sont :
+
+* disponibles à l'échelle communale quand c'est possible ;
+* comparables entre villes ;
+* interprétables par l'utilisateur ;
+* issus de sources publiques ou de calculs explicables ;
+* suffisamment complets pour ne pas introduire de biais artificiel.
 
 ## Sources principales
 
 Les principales sources utilisées sont :
 
-- INSEE : population, démographie, revenus, chômage, logements, établissements ;
-- INSEE BPE : équipements et services ;
-- DVF : prix immobiliers réels ;
-- SSMSI : criminalité et sécurité ;
-- ARCEP : fibre ;
-- ATMO : qualité de l'air lorsque disponible ;
-- données géographiques : distances à la mer et à la montagne ;
-- normales climatiques ou données climatiques agrégées : climat orientatif.
+* INSEE : population, démographie, revenus, chômage, logements, établissements ;
+* INSEE BPE : équipements et services ;
+* DVF : prix immobiliers réels ;
+* SSMSI : criminalité et sécurité ;
+* ARCEP : fibre ;
+* ATMO : qualité de l'air lorsque disponible ;
+* données géographiques : distances à la mer et à la montagne ;
+* normales climatiques ou données climatiques agrégées : climat orientatif.
+
+Ces sources peuvent avoir des temporalités différentes. Certaines données sont plus récentes que d'autres, ce qui doit être pris en compte dans l'interprétation des résultats.
 
 ## Données conservées
 
-CityMatch conserve uniquement les critères considérés comme exploitables :
+CityMatch conserve uniquement les critères considérés comme exploitables.
 
-- population ;
-- latitude ;
-- longitude ;
-- revenu_median ;
-- taux_chomage ;
-- âge et structure démographique ;
-- prix_immo_m2 ;
-- taux_logements_vacants ;
-- criminalité et sécurité ;
-- distance_mer_km ;
-- distance_montagne_km ;
-- fibre_pct ;
-- qualite_air_score ;
-- climat ;
-- équipements BPE ;
-- ratios BPE.
+Les principales données conservées sont :
+
+* population ;
+* latitude ;
+* longitude ;
+* revenu_median ;
+* taux_chomage ;
+* âge et structure démographique ;
+* prix_immo_m2 ;
+* taux_logements_vacants ;
+* criminalité et sécurité ;
+* distance_mer_km ;
+* distance_montagne_km ;
+* fibre_pct ;
+* qualite_air_score ;
+* ensoleillement_h_an ;
+* temperature_moyenne ;
+* precipitations_mm ;
+* score_climat ;
+* équipements BPE ;
+* ratios BPE.
+
+Les ratios sont privilégiés quand ils permettent une comparaison plus juste entre villes de tailles différentes.
 
 ## Données volontairement exclues
 
-Certains critères ont été retirés ou désactivés car leur source était trop fragile ou leur couverture insuffisante.
+Certains critères ont été retirés ou désactivés car leur source était trop fragile, trop subjective ou trop incomplète.
 
 Exemples :
-- score nature / part d'espaces naturels si la couverture géographique est insuffisante ;
-- score biodiversité saturé ;
-- pollution des sols si la donnée ne permet pas une comparaison fiable ;
-- scores d'avis habitants subjectifs ;
-- taux de réussite scolaire non intégré proprement ;
-- données estimées artificiellement sans source réelle.
+
+* score nature global si la couverture géographique est insuffisante ;
+* part d'espaces naturels si la donnée n'est pas homogène à l'échelle nationale ;
+* score biodiversité saturé ou difficile à interpréter ;
+* pollution des sols si la donnée ne permet pas une comparaison fiable entre communes ;
+* scores d'avis habitants subjectifs ;
+* taux de réussite scolaire non intégré proprement ;
+* données estimées artificiellement sans source réelle ;
+* critères sensibles ou discriminatoires liés à l'origine, la religion, l'ethnicité ou la nationalité des habitants.
+
+Ces données peuvent être mentionnées comme limites ou perspectives, mais elles ne doivent pas être utilisées comme critères actifs tant qu'elles ne sont pas correctement sourcées, intégrées et évaluées.
 
 ## Gestion des valeurs manquantes
 
 Une valeur manquante ne doit pas être interprétée comme une mauvaise valeur.
 
 Exemple :
-- qualite_air_score = NULL signifie que la donnée ATMO n'est pas disponible pour cette ville dans les sources intégrées ;
-- cela ne signifie pas que l'air est mauvais.
+
+* qualite_air_score = NULL signifie que la donnée ATMO n'est pas disponible pour cette ville dans les sources intégrées ;
+* cela ne signifie pas que l'air est mauvais.
 
 Dans le scoring, les valeurs manquantes doivent être traitées de manière neutre ou être exclues du détail des points forts/faibles.
+
+CityMatch évite donc de transformer une absence de donnée en pénalité automatique.
 
 ## Prix immobilier
 
@@ -74,43 +101,100 @@ Pour éviter les valeurs aberrantes, CityMatch doit regrouper les mutations immo
 
 Le prix est un indicateur médian au m², utile pour comparer les villes, mais il ne remplace pas une recherche immobilière réelle.
 
+Quand l'utilisateur indique un budget d'achat, CityMatch peut estimer une surface accessible :
+
+surface_estimable_m2 = budget_immobilier / prix_immo_m2
+
+Cette estimation sert seulement à comparer les villes entre elles. Elle ne garantit pas qu'un bien correspondant au budget soit réellement disponible sur le marché.
+
 ## Qualité de l'air
 
-CityMatch utilise uniquement des données air issues de sources ATMO ou de fallbacks régionaux officiels lorsque disponibles.
+CityMatch utilise uniquement des données de qualité de l'air issues de sources ATMO ou de sources régionales officielles lorsque disponibles.
 
 Aucune estimation statistique ne doit être utilisée pour remplir artificiellement les villes sans donnée.
+
+Si la qualité de l'air est absente pour une ville, cela doit être traité comme une donnée indisponible, pas comme une mauvaise qualité de l'air.
 
 ## Nature
 
 CityMatch ne propose pas actuellement de score nature global fiable.
 
-Les demandes liées à la nature sont traitées avec des critères disponibles :
-- proximité mer ;
-- proximité montagne ;
-- taille de ville ;
-- climat ;
-- sécurité.
+Les demandes liées à la nature, à la verdure, aux forêts, à la campagne ou aux espaces verts sont donc signalées dans les notes méthodologiques, mais elles ne sont pas transformées automatiquement en score artificiel.
 
-Un vrai indicateur nature pourra être ajouté plus tard si une source nationale fiable et bien couverte est intégrée.
+CityMatch n'ajoute pas automatiquement des critères comme la sécurité, le prix immobilier, la population ou le climat pour approximer la nature, car cela risquerait de créer une recommandation trompeuse.
+
+En revanche, si l'utilisateur mentionne explicitement un besoin mesurable, CityMatch peut utiliser les critères correspondants :
+
+* “proche de la mer” → distance_mer_km ;
+* “proche de la montagne”, “ski”, “randonnée en montagne” → distance_montagne_km ;
+* “climat doux”, “soleil”, “pas trop de pluie” → score_climat, ensoleillement_h_an, temperature_moyenne ou precipitations_mm ;
+* “ville calme” → population modérée et sécurité, avec prudence.
+
+Un vrai indicateur nature pourra être ajouté plus tard si une source nationale fiable, homogène et bien couverte est intégrée.
 
 ## Scoring
 
 Le scoring suit une logique multicritères :
 
-1. normalisation des indicateurs ;
-2. inversion des critères où “plus bas = mieux” ;
-3. pondération selon le profil utilisateur ;
-4. calcul d'un score global ;
-5. génération d'un classement.
+1. validation des critères issus du profil utilisateur ;
+2. normalisation des indicateurs sur une échelle commune ;
+3. inversion des critères où “plus bas = mieux” ;
+4. pondération selon le profil utilisateur ;
+5. calcul d'un score global ;
+6. génération d'un classement.
 
 Le résultat est une aide à la décision, pas une vérité absolue.
+
+Le score est relatif à l'échantillon de villes candidates. Une ville peut être bien classée parce qu'elle représente le meilleur compromis parmi les villes sélectionnées, et non parce qu'elle est parfaite dans l'absolu.
+
+## Préfiltrage et fallback
+
+Avant le scoring, CityMatch peut appliquer des filtres pour réduire l'espace de recherche :
+
+* population minimale ou maximale ;
+* régions préférées ;
+* budget immobilier ;
+* proximité à la mer ou à la montagne ;
+* proximité à une ville de référence ;
+* certains critères prioritaires.
+
+Si les filtres sont trop restrictifs et produisent trop peu de villes candidates, le système peut relâcher progressivement certains filtres afin de conserver une liste exploitable.
+
+Ce relâchement doit rester transparent dans le rapport ou dans les notes méthodologiques.
+
+## Ville de référence
+
+Quand l'utilisateur demande une proximité à une ville, par exemple “proche de Lyon” ou “à moins d'une heure de Bordeaux”, CityMatch résout la ville de référence dans la base puis calcule les distances à partir des coordonnées GPS.
+
+La ville de référence n'est pas un critère de scoring. C'est un filtre géographique ou un post-traitement.
+
+Si la ville de référence n'est pas retrouvée dans la base, CityMatch doit l'indiquer clairement et ne pas prétendre que le filtre de proximité a été appliqué.
 
 ## Transparence
 
 CityMatch doit pouvoir expliquer :
-- d'où viennent les données ;
-- pourquoi un critère est utilisé ;
-- quand une donnée est manquante ;
-- quelles sont les limites d'un indicateur.
+
+* d'où viennent les données ;
+* pourquoi un critère est utilisé ;
+* quand une donnée est manquante ;
+* quels critères ne sont pas disponibles ;
+* quelles sont les limites d'un indicateur ;
+* pourquoi une ville est bien ou mal classée.
 
 Cette transparence est essentielle pour éviter une recommandation opaque ou trompeuse.
+
+## Limites générales
+
+CityMatch reste une aide à la décision.
+
+Les résultats doivent être complétés par :
+
+* une visite sur place ;
+* une recherche immobilière réelle ;
+* l'analyse des transports quotidiens ;
+* les besoins familiaux précis ;
+* les contraintes professionnelles ;
+* le ressenti personnel ;
+* les caractéristiques du quartier visé.
+
+Le but est de proposer une première sélection cohérente, pas de remplacer le jugement humain.

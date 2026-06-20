@@ -1,240 +1,417 @@
 """
 agents/scoring_agent.py
-────────────────────────
+───────────────────────
 Agent de scoring multi-critères pondéré.
-Calcule un score global (0-100) pour chaque ville candidate
-en fonction des critères et pondérations définis par l'utilisateur.
+
+Calcule un score global sur 100 pour chaque ville candidate à partir des
+critères pondérés de l'utilisateur.
 
 Algorithme :
-1. Normalisation min-max de chaque indicateur → [0, 10]
-2. Inversion si "plus bas = mieux" (ex: taux de chômage)
-3. Pondération par les poids utilisateur (1-5)
-4. Calcul du score global (moyenne pondérée × 20 → [0-100])
-5. Bonus/malus pour les critères éliminatoires
+1. validation des critères issus du LLM ;
+2. normalisation min-max de chaque indicateur sur [0, 10] ;
+3. inversion des critères où une valeur basse est préférable ;
+4. imputation neutre des valeurs manquantes ;
+5. moyenne pondérée ramenée sur 100 ;
+6. classement et persistance des meilleurs scores en base.
 """
 
+from __future__ import annotations
+
+import logging
 import time
-import numpy as np
+from typing import Any
+
 import pandas as pd
-from db.models import SessionLocal, CityScore, AgentLog
-from graph.state import CityMatchState
+
+from agents.common.criteria import filter_valid_criteria
 from config.settings import AVAILABLE_CRITERIA, MAX_CITIES_IN_REPORT
-from rich.console import Console
-from rich.table import Table
+from db.models import AgentLog, CityScore, SessionLocal
+from graph.state import CityMatchState
+from utils.serialization import to_python
 
-console = Console()
+
+logger = logging.getLogger(__name__)
+
+SCORING_AGENT_NAME = "ScoringAgent"
+SCORING_AGENT_ACTION = "score_cities"
+DEFAULT_WEIGHT = 3
+MIN_WEIGHT = 1
+MAX_WEIGHT = 5
+MAX_AGENT_TRACE_ENTRIES = 200
 
 
-from agents.common.serialization import to_python as _to_python
+def _append_agent_trace(state: CityMatchState, message: str) -> None:
+    """Ajoute une trace courte dans l'état LangGraph."""
+    trace = list(state.get("agent_trace") or [])
+    trace.append(message)
+    state["agent_trace"] = trace[-MAX_AGENT_TRACE_ENTRIES:]
+
+
+def _coerce_weight(value: Any) -> int | None:
+    """Convertit un poids LLM en entier borné entre 1 et 5."""
+    try:
+        weight = int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+    if weight <= 0:
+        return None
+
+    return max(MIN_WEIGHT, min(MAX_WEIGHT, weight))
+
+
+def _sanitize_weights(raw_weights: dict[str, Any] | None) -> tuple[dict[str, int], set[str]]:
+    """Valide les critères et convertit les poids utilisateur."""
+    valid_criteria, ignored_criteria = filter_valid_criteria(raw_weights or {})
+
+    weights: dict[str, int] = {}
+
+    for criterion, raw_weight in valid_criteria.items():
+        if criterion not in AVAILABLE_CRITERIA:
+            ignored_criteria.add(criterion)
+            continue
+
+        weight = _coerce_weight(raw_weight)
+
+        if weight is not None:
+            weights[criterion] = weight
+
+    return weights, ignored_criteria
+
+
+def _default_weights_for_dataframe(df: pd.DataFrame) -> dict[str, int]:
+    """Construit des poids égaux pour les critères disponibles dans les données."""
+    return {
+        criterion: DEFAULT_WEIGHT
+        for criterion in AVAILABLE_CRITERIA
+        if criterion in df.columns
+    }
+
 
 def normalize_series(series: pd.Series, lower_is_better: bool = False) -> pd.Series:
     """
-    Normalisation min-max d'une série → [0, 10].
-    Si lower_is_better=True, on inverse (10 - valeur normalisée)
-    pour que le score soit toujours "plus grand = mieux".
-    """
-    min_val, max_val = series.min(), series.max()
-    if max_val == min_val:
-        # Toutes les villes ont la même valeur → score neutre de 5
-        return pd.Series([5.0] * len(series), index=series.index)
+    Normalise une série numérique sur [0, 10].
 
-    normalized = (series - min_val) / (max_val - min_val) * 10
+    Si lower_is_better=True, le score est inversé pour conserver la règle :
+    plus le score est élevé, meilleure est la ville.
+    """
+    numeric_series = pd.to_numeric(series, errors="coerce")
+
+    min_value = numeric_series.min()
+    max_value = numeric_series.max()
+
+    if pd.isna(min_value) or pd.isna(max_value) or max_value == min_value:
+        return pd.Series([5.0] * len(numeric_series), index=numeric_series.index)
+
+    normalized = (numeric_series - min_value) / (max_value - min_value) * 10
+
     if lower_is_better:
         normalized = 10 - normalized
-    return normalized
+
+    return normalized.clip(lower=0, upper=10)
 
 
-def compute_weighted_score(row: pd.Series, weights: dict, normalized_df: pd.DataFrame) -> dict:
-    """
-    Calcule le score pondéré d'une ville et le détail par critère.
+def _build_normalized_dataframe(
+    df: pd.DataFrame,
+    weights: dict[str, int],
+) -> pd.DataFrame:
+    """Construit le DataFrame des scores normalisés et des indicateurs de présence."""
+    normalized_df = pd.DataFrame(index=df.index)
 
-    Args:
-        row: ligne du DataFrame pour une ville
-        weights: {critere: poids} (1-5)
-        normalized_df: DataFrame des scores normalisés
+    for criterion in weights:
+        if criterion not in df.columns:
+            logger.warning("Critère absent des données et ignoré : %s", criterion)
+            continue
 
-    Returns:
-        dict avec total_score et score_details
-    """
+        raw_values = pd.to_numeric(df[criterion], errors="coerce")
+        has_data = raw_values.notna()
+
+        median_value = raw_values.median()
+        fill_value = median_value if not pd.isna(median_value) else 5.0
+        filled_values = raw_values.fillna(fill_value)
+
+        lower_is_better = AVAILABLE_CRITERIA.get(criterion, {}).get(
+            "lower_is_better",
+            False,
+        )
+
+        normalized_df[criterion] = normalize_series(
+            filled_values,
+            lower_is_better=lower_is_better,
+        )
+        normalized_df[f"{criterion}__has_data"] = has_data
+
+    return normalized_df
+
+
+def compute_weighted_score(
+    row: pd.Series,
+    weights: dict[str, int],
+    normalized_df: pd.DataFrame,
+) -> dict[str, Any]:
+    """Calcule le score pondéré d'une ville et le détail par critère."""
     total_weight = sum(weights.values())
-    if total_weight == 0:
+
+    if total_weight <= 0:
         return {"total_score": 0.0, "score_details": {}}
 
     weighted_sum = 0.0
-    details = {}
+    details: dict[str, Any] = {}
 
-    for critere, poids in weights.items():
-        if critere in normalized_df.columns:
-            score_10 = normalized_df.loc[row.name, critere]
-            has_data = normalized_df.get(f"{critere}__has_data", pd.Series([True]*len(normalized_df))).loc[row.name]
-            contribution = score_10 * poids
-            weighted_sum += contribution
-            raw_val = row.get(critere)
-            details[critere] = {
-                "raw_value": raw_val,
-                "normalized_score": round(score_10, 2) if has_data else None,
-                "weight": poids,
-                "contribution": round(contribution, 2),
-                "unit": AVAILABLE_CRITERIA.get(critere, {}).get("unit", ""),
-                "label": AVAILABLE_CRITERIA.get(critere, {}).get("label", critere),
-                "has_data": bool(has_data),
-            }
+    for criterion, weight in weights.items():
+        if criterion not in normalized_df.columns:
+            continue
 
-    # Score global sur 100
+        score_10 = float(normalized_df.loc[row.name, criterion])
+        has_data = bool(
+            normalized_df.get(
+                f"{criterion}__has_data",
+                pd.Series(True, index=normalized_df.index),
+            ).loc[row.name]
+        )
+
+        contribution = score_10 * weight
+        weighted_sum += contribution
+
+        criterion_config = AVAILABLE_CRITERIA.get(criterion, {})
+
+        details[criterion] = {
+            "raw_value": to_python(row.get(criterion)),
+            "normalized_score": round(score_10, 2) if has_data else None,
+            "weight": weight,
+            "contribution": round(contribution, 2),
+            "unit": criterion_config.get("unit", ""),
+            "label": criterion_config.get("label", criterion),
+            "has_data": has_data,
+        }
+
     total_score = (weighted_sum / (total_weight * 10)) * 100
+
     return {
         "total_score": round(total_score, 2),
         "score_details": details,
     }
 
 
-def run_scoring_agent(state: CityMatchState) -> CityMatchState:
-    """
-    Nœud LangGraph : Agent de scoring multi-critères.
+def _score_city_rows(
+    city_data: list[dict[str, Any]],
+    raw_weights: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Score et classe les villes candidates."""
+    df = pd.DataFrame(city_data)
 
-    Flux :
-    1. Charge les données brutes des villes depuis l'état
-    2. Normalise chaque indicateur (min-max, 0-10)
-    3. Applique les pondérations utilisateur
-    4. Trie les villes par score décroissant
-    5. Sauvegarde les scores en base
-    """
-    start_time = time.time()
-    console.print("\n[bold cyan]🏆 ScoringAgent activé[/bold cyan]")
-
-    # ── Données d'entrée ──────────────────────────────────────────────────────
-    city_data = state.get("enriched_city_data") or state.get("raw_city_data", [])
-    user_criteria = state.get("user_criteria", {})
-    weights = user_criteria.get("criteres", {})
-
-    if not city_data:
-        console.print("[yellow]⚠️  Aucune donnée de ville à scorer.[/yellow]")
-        state["scored_cities"] = []
-        state["top_cities"] = []
-        return state
+    weights, ignored_criteria = _sanitize_weights(raw_weights)
 
     if not weights:
-        console.print("[yellow]⚠️  Aucun poids défini, utilisation de poids égaux.[/yellow]")
-        weights = {k: 3 for k in AVAILABLE_CRITERIA.keys()}
+        weights = _default_weights_for_dataframe(df)
 
-    # ── Conversion en DataFrame ────────────────────────────────────────────────
-    df = pd.DataFrame(city_data)
-    console.print(f"[dim]Scoring de {len(df)} villes avec {len(weights)} critères...[/dim]")
+    valid_weights = {
+        criterion: weight
+        for criterion, weight in weights.items()
+        if criterion in df.columns
+    }
 
-    # ── Nettoyage : ignorer critères invalides inventés par le LLM ───────────
-    # Whitelist exhaustive — tous les critères disponibles dans AVAILABLE_CRITERIA
-    from agents.common.criteria import VALID_CRITERIA_KEYS as VALID_KEYS
-    weights = {k: v for k, v in weights.items() if k in VALID_KEYS}
+    if not valid_weights:
+        scored_rows = []
 
-    # ── Normalisation par critère ──────────────────────────────────────────────
-    normalized_df = pd.DataFrame(index=df.index)
+        for index, row in df.iterrows():
+            city_scored = to_python(row.to_dict())
+            city_scored["total_score"] = 0.0
+            city_scored["score_details"] = {}
+            city_scored["rank"] = index + 1
+            scored_rows.append(city_scored)
 
-    for critere in weights.keys():
-        if critere not in df.columns:
-            console.print(f"[yellow]⚠️  Critère '{critere}' absent des données, ignoré.[/yellow]")
-            continue
+        return scored_rows, ignored_criteria
 
-        col_data = pd.to_numeric(df[critere], errors='coerce')
-        # Ne pas remplacer les NULL par 0 — une ville sans données ne doit pas
-        # être pénalisée. On normalise uniquement sur les villes qui ont la donnée,
-        # les autres reçoivent la médiane (score neutre) plutôt que 0.
-        median_val = col_data.median()
-        col_data_filled = col_data.fillna(median_val if not pd.isna(median_val) else 5.0)
-        lower_is_better = AVAILABLE_CRITERIA.get(critere, {}).get("lower_is_better", False)
-        normalized_df[critere] = normalize_series(col_data_filled, lower_is_better)
-        # Marquer les villes sans donnée pour les exclure des points forts/faibles
-        normalized_df[f"{critere}__has_data"] = col_data.notna()
+    normalized_df = _build_normalized_dataframe(df, valid_weights)
 
-    # ── Calcul des scores ──────────────────────────────────────────────────────
-    scored_rows = []
-    valid_weights = {k: v for k, v in weights.items() if k in normalized_df.columns}
+    scored_rows: list[dict[str, Any]] = []
 
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
         score_data = compute_weighted_score(row, valid_weights, normalized_df)
-        city_scored = _to_python(row.to_dict())
+
+        city_scored = to_python(row.to_dict())
         city_scored["total_score"] = float(score_data["total_score"])
-        city_scored["score_details"] = _to_python(score_data["score_details"])
+        city_scored["score_details"] = to_python(score_data["score_details"])
+
         scored_rows.append(city_scored)
 
-    # ── Tri par score décroissant ─────────────────────────────────────────────
-    scored_rows.sort(key=lambda x: x["total_score"], reverse=True)
+    scored_rows.sort(key=lambda city: city["total_score"], reverse=True)
 
-    # Ajout du rang
-    for i, city in enumerate(scored_rows):
-        city["rank"] = i + 1
+    for rank, city in enumerate(scored_rows, start=1):
+        city["rank"] = rank
 
-    state["scored_cities"] = scored_rows
-    state["top_cities"] = scored_rows[:MAX_CITIES_IN_REPORT]
+    return scored_rows, ignored_criteria
 
-    # ── Affichage console du TOP 5 ────────────────────────────────────────────
-    table = Table(title=f"🏆 TOP {min(5, len(scored_rows))} Villes", show_header=True)
-    table.add_column("Rang", style="bold yellow", width=6)
-    table.add_column("Ville", style="bold white", width=25)
-    table.add_column("Région", style="cyan", width=30)
-    table.add_column("Score", style="bold green", width=10)
-    table.add_column("Population", style="dim", width=12)
 
-    for city in scored_rows[:5]:
-        table.add_row(
-            f"#{city['rank']}",
-            city.get("nom", "?"),
-            city.get("region", "?"),
-            f"{city['total_score']:.1f}/100",
-            f"{city.get('population', 0):,}",
+def _save_scores_to_db(
+    db,
+    session_id: str,
+    scored_rows: list[dict[str, Any]],
+) -> None:
+    """Sauvegarde les meilleurs scores dans la table city_scores."""
+    db.query(CityScore).filter_by(session_id=session_id).delete()
+
+    for city in scored_rows[:MAX_CITIES_IN_REPORT]:
+        city_id = city.get("id")
+
+        if city_id is None:
+            continue
+
+        score_entry = CityScore(
+            city_id=city_id,
+            session_id=session_id,
+            total_score=city["total_score"],
+            rank=city["rank"],
+            score_details=to_python(city.get("score_details", {})),
         )
-    console.print(table)
 
-    # ── Persistance en base ────────────────────────────────────────────────────
-    _save_scores_to_db(state, scored_rows)
+        db.add(score_entry)
 
-    duration_ms = int((time.time() - start_time) * 1000)
-    console.print(f"[green]✅ Scoring terminé en {duration_ms}ms[/green]")
 
-    trace = state.get("agent_trace", [])
-    trace.append(f"ScoringAgent: {len(scored_rows)} villes scorées en {duration_ms}ms")
-    state["agent_trace"] = trace
+def run_scoring_agent(state: CityMatchState) -> CityMatchState:
+    """
+    Nœud LangGraph : agent de scoring multi-critères.
+
+    Lit les villes candidates depuis l'état, calcule les scores, sauvegarde les
+    meilleurs résultats et met à jour ``scored_cities`` et ``top_cities``.
+    """
+    start_time = time.perf_counter()
+
+    city_data = state.get("enriched_city_data") or state.get("raw_city_data") or []
+    user_criteria = dict(state.get("user_criteria") or {})
+    raw_weights = user_criteria.get("criteres", {})
+    session_id = state.get("session_id", "unknown")
+
+    db = SessionLocal()
+
+    log_entry = AgentLog(
+        session_id=session_id,
+        agent_name=SCORING_AGENT_NAME,
+        action=SCORING_AGENT_ACTION,
+        input_data=to_python(
+            {
+                "cities_count": len(city_data),
+                "criteria": raw_weights,
+            }
+        ),
+        success=False,
+    )
+
+    try:
+        if not city_data:
+            state["scored_cities"] = []
+            state["top_cities"] = []
+
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+            log_entry.output_data = {"scored_count": 0}
+            log_entry.duration_ms = duration_ms
+            log_entry.success = True
+
+            _append_agent_trace(
+                state,
+                f"{SCORING_AGENT_NAME}: aucune ville à scorer",
+            )
+
+            return state
+
+        scored_rows, ignored_criteria = _score_city_rows(
+            city_data=city_data,
+            raw_weights=raw_weights,
+        )
+
+        top_cities = scored_rows[:MAX_CITIES_IN_REPORT]
+
+        state["scored_cities"] = scored_rows
+        state["top_cities"] = top_cities
+
+        _save_scores_to_db(
+            db=db,
+            session_id=session_id,
+            scored_rows=scored_rows,
+        )
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        log_entry.output_data = to_python(
+            {
+                "scored_count": len(scored_rows),
+                "top_count": len(top_cities),
+                "ignored_criteria": sorted(ignored_criteria),
+                "best_city": top_cities[0].get("nom") if top_cities else None,
+                "best_score": top_cities[0].get("total_score") if top_cities else None,
+            }
+        )
+        log_entry.duration_ms = duration_ms
+        log_entry.success = True
+
+        _append_agent_trace(
+            state,
+            f"{SCORING_AGENT_NAME}: {len(scored_rows)} villes scorées en {duration_ms} ms",
+        )
+
+    except Exception as exc:
+        db.rollback()
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        logger.exception("Erreur pendant l'exécution du ScoringAgent")
+
+        state["error"] = f"{SCORING_AGENT_NAME}: {exc}"
+        state["scored_cities"] = []
+        state["top_cities"] = []
+
+        log_entry.duration_ms = duration_ms
+        log_entry.success = False
+        log_entry.error_message = str(exc)
+
+        _append_agent_trace(
+            state,
+            f"{SCORING_AGENT_NAME}: erreur après {duration_ms} ms",
+        )
+
+    finally:
+        try:
+            db.add(log_entry)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Impossible d'enregistrer les résultats du ScoringAgent")
+        finally:
+            db.close()
 
     return state
 
 
-def _save_scores_to_db(state: CityMatchState, scored_rows: list):
-    """Sauvegarde les scores calculés dans la table city_scores."""
-    db = SessionLocal()
-    try:
-        session_id = state.get("session_id", "unknown")
-        # Supprimer les anciens scores de cette session
-        db.query(CityScore).filter_by(session_id=session_id).delete()
-
-        for city in scored_rows[:MAX_CITIES_IN_REPORT]:
-            score_entry = CityScore(
-                city_id=city.get("id"),
-                session_id=session_id,
-                total_score=city["total_score"],
-                rank=city["rank"],
-                score_details=city.get("score_details", {}),
-            )
-            db.add(score_entry)
-
-        db.commit()
-        console.print(f"[dim]Scores sauvegardés en base (session {session_id[:8]}...)[/dim]")
-    except Exception as e:
-        console.print(f"[yellow]⚠️  Erreur sauvegarde scores : {e}[/yellow]")
-    finally:
-        db.close()
-
-
-def get_score_radar_data(city: dict) -> dict:
+def get_score_radar_data(city: dict[str, Any]) -> dict[str, Any]:
     """
-    Formate les données de score pour affichage en graphique radar.
-    Utilisé par l'interface Streamlit et le ReportAgent.
+    Formate les scores par critère pour un graphique radar.
+
+    Utilisé par l'interface Streamlit ou le ReportAgent.
+    Les critères sans donnée réelle sont exclus pour éviter un affichage trompeur.
     """
     details = city.get("score_details", {})
-    categories = []
-    scores = []
 
-    for critere, data in details.items():
-        label = AVAILABLE_CRITERIA.get(critere, {}).get("label", critere)
+    categories: list[str] = []
+    scores: list[float] = []
+
+    for criterion, data in details.items():
+        if not data.get("has_data", True):
+            continue
+
+        normalized_score = data.get("normalized_score")
+
+        if normalized_score is None:
+            continue
+
+        label = AVAILABLE_CRITERIA.get(criterion, {}).get("label", criterion)
+
         categories.append(label)
-        scores.append(data.get("normalized_score", 0))
+        scores.append(float(normalized_score))
 
-    return {"categories": categories, "scores": scores, "city_name": city.get("nom", "?")}
+    return {
+        "categories": categories,
+        "scores": scores,
+        "city_name": city.get("nom", "?"),
+    }

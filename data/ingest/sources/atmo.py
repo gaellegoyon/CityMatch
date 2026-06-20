@@ -1,177 +1,49 @@
 """
 data/ingest/sources/atmo.py
+───────────────────────────
+Qualité de l'air réelle pour CityMatch.
 
-Qualité de l'air réelle :
-- flux/cache national ATMO si disponible ;
+Sources utilisées :
+- cache national/local ATMO si disponible ;
+- tentative de téléchargement national via data.gouv.fr ;
 - fallback régional ATMO Occitanie ;
-- fallback régional Air Breizh pour les pages validées.
+- fallback régional Air Breizh pour quelques pages publiques validées.
 
-Aucune estimation statistique n'est réalisée. Si aucune source officielle
-exploitable n'est trouvée, la valeur reste NULL.
+Aucune estimation statistique n'est réalisée.
+Si aucune source officielle exploitable n'est trouvée, la valeur reste NULL.
 """
 
 from __future__ import annotations
 
-import html
 import json
 import re
 import unicodedata
 import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Final
 
 import pandas as pd
 import requests
 
 from data.ingest.config import CACHE_DIR, HTTP_TIMEOUT
-from data.ingest.utils import console, download_cached, read_csv_flexible, to_float
-
-# ── Source ATMO : qualité de l'air réelle si disponible ──────────────────────
-_atmo_cache: Optional[pd.DataFrame] = None
+from data.ingest.utils import console, read_csv_flexible, to_float
 
 
-def download_data_gouv_csv_resource(query: str, cache_filename: str) -> Optional[Path]:
-    """
-    Recherche et télécharge une ressource CSV/ZIP/GZ exploitable depuis data.gouv.fr.
+USER_AGENT: Final[str] = "CityMatch/1.0"
+MIN_CACHE_SIZE_BYTES: Final[int] = 1_000
+DOWNLOAD_CHUNK_SIZE: Final[int] = 8192
 
-    Cette fonction est volontairement défensive :
-    - elle ignore les pages HTML, PDF et endpoints de documentation ;
-    - elle garde le fichier en cache ;
-    - elle retourne None si aucune ressource fiable n'est trouvée.
-
-    Elle sert uniquement de tentative complémentaire pour le flux national ATMO.
-    Les fallbacks régionaux officiels restent utilisés ensuite.
-    """
-    cache_path = CACHE_DIR / cache_filename
-
-    if cache_path.exists() and cache_path.stat().st_size > 1000:
-        return cache_path
-
-    api_url = "https://www.data.gouv.fr/api/1/datasets/"
-    try:
-        response = requests.get(
-            api_url,
-            params={"q": query, "page_size": 10},
-            timeout=HTTP_TIMEOUT,
-            headers={"User-Agent": "CityMatch/1.0"},
-        )
-        if response.status_code != 200:
-            console.print(f"[yellow]⚠️  data.gouv HTTP {response.status_code} pour {query}[/yellow]")
-            return None
-
-        payload = response.json()
-        datasets = payload.get("data", []) or []
-    except Exception as exc:
-        console.print(f"[yellow]⚠️  Recherche data.gouv impossible : {exc}[/yellow]")
-        return None
-
-    candidates: list[tuple[int, str, str]] = []
-
-    for dataset in datasets:
-        dataset_title = str(dataset.get("title") or "")
-        for resource in dataset.get("resources", []) or []:
-            url = str(resource.get("url") or "")
-            title = str(resource.get("title") or resource.get("description") or "")
-            fmt = str(resource.get("format") or "")
-            blob = f"{dataset_title} {title} {fmt} {url}".lower()
-
-            if not url.startswith("http"):
-                continue
-
-            score = 0
-
-            if "csv" in blob:
-                score += 50
-            if "zip" in blob:
-                score += 25
-            if "indice" in blob:
-                score += 15
-            if "atmo" in blob:
-                score += 15
-            if "commune" in blob or "communal" in blob:
-                score += 15
-            if "qualite" in blob or "qualité" in blob:
-                score += 10
-            if "air" in blob:
-                score += 10
-
-            # Ressources non exploitables pour pandas/read_csv_flexible.
-            if any(bad in blob for bad in ["api/doc", "documentation", ".pdf", "html", "swagger"]):
-                score -= 200
-
-            if score > 0:
-                candidates.append((score, url, fmt))
-
-    candidates.sort(reverse=True)
-
-    for score, url, fmt in candidates:
-        try:
-            suffix = _guess_download_suffix(url, fmt)
-            target = cache_path.with_suffix(suffix) if suffix != cache_path.suffix else cache_path
-            tmp = target.with_suffix(target.suffix + ".part")
-
-            console.print(f"[blue]⬇️  Téléchargement data.gouv ATMO : {url}[/blue]")
-            with requests.get(
-                url,
-                timeout=HTTP_TIMEOUT,
-                stream=True,
-                headers={"User-Agent": "CityMatch/1.0"},
-            ) as resp:
-                if resp.status_code != 200:
-                    console.print(f"[yellow]⚠️  HTTP {resp.status_code} pour {url}[/yellow]")
-                    continue
-
-                first_chunk = b""
-                with open(tmp, "wb") as fh:
-                    for chunk in resp.iter_content(8192):
-                        if not chunk:
-                            continue
-                        if not first_chunk:
-                            first_chunk = chunk[:200]
-                        fh.write(chunk)
-
-            # Évite de garder une page HTML/API doc enregistrée en .csv.
-            head = first_chunk.decode("utf-8", errors="ignore").lower()
-            if "<html" in head or "swagger" in head or "openapi" in head:
-                tmp.unlink(missing_ok=True)
-                console.print("[yellow]⚠️  Ressource data.gouv ignorée : contenu non CSV/ZIP[/yellow]")
-                continue
-
-            if tmp.exists() and tmp.stat().st_size > 1000:
-                tmp.replace(target)
-                console.print(
-                    f"[green]✅ Ressource data.gouv téléchargée : {target.name} "
-                    f"({target.stat().st_size // 1024} KB, score={score})[/green]"
-                )
-                return target
-
-            tmp.unlink(missing_ok=True)
-
-        except Exception as exc:
-            console.print(f"[yellow]⚠️  Téléchargement data.gouv impossible : {exc}[/yellow]")
-
-    return None
+_atmo_cache: pd.DataFrame | None = None
 
 
-def _guess_download_suffix(url: str, fmt: str = "") -> str:
-    """Déduit l'extension locale à utiliser pour une ressource téléchargée."""
-    blob = f"{url} {fmt}".lower()
+ATMO_NATIONAL_CACHE_FILES: Final[tuple[str, ...]] = (
+    "atmo_commune.csv",
+    "atmo_air_quality_commune.csv",
+    "indice_atmo_commune.csv",
+    "atmo_indice_qualite_air_commune.csv",
+)
 
-    if ".zip" in blob or "zip" == str(fmt).lower():
-        return ".zip"
-    if ".gz" in blob or "gzip" in blob:
-        return ".csv.gz"
-    if ".json" in blob or "json" == str(fmt).lower():
-        return ".json"
-
-    return ".csv"
-
-
-# Sources régionales utilisées en fallback réel pour les communes absentes
-# du flux national ATMO. Ce n'est pas une estimation : ce sont des indices publiés
-# par les AASQA régionales (ATMO Occitanie, Air Breizh).
-ATMO_OCCITANIE_URLS = [
-    # Opendatasoft officiel ATMO Occitanie — export CSV complet.
+ATMO_OCCITANIE_URLS: Final[tuple[str, ...]] = (
     (
         "https://82-opendata-occitanie.opendatasoft.com/api/explore/v2.1/catalog/datasets/"
         "indice-quotidien-de-qualite-de-lair-pour-les-collectivites-territoriales/"
@@ -182,24 +54,18 @@ ATMO_OCCITANIE_URLS = [
         "indice-quotidien-de-qualite-de-lair-pour-les-collectivites-territoriales/"
         "download/?format=csv&timezone=Europe/Paris&use_labels_for_header=true"
     ),
-    # Miroir parfois utilisé par la plateforme.
     (
         "https://data.82amenagement.fr/api/explore/v2.1/catalog/datasets/"
         "indice-quotidien-de-qualite-de-lair-pour-les-collectivites-territoriales/"
         "exports/csv?lang=fr&timezone=Europe%2FParis&use_labels=true&delimiter=%3B"
     ),
-    # ArcGIS REST officiel : utilisé si les exports Opendatasoft changent.
     (
         "https://dservices9.arcgis.com/7Sr9Ek9c1QTKmbwr/arcgis/rest/services/"
         "ind_occitanie/FeatureServer/0/query?where=1%3D1&outFields=*&f=geojson"
     ),
-]
+)
 
-# Codes INSEE des principales villes CityMatch d'Occitanie.
-# Utilisé uniquement si le fichier régional fournit un nom de zone mais pas un
-# code INSEE communal. On rattache alors l'indice réel publié pour le territoire
-# ATMO correspondant à la ville centrale.
-ATMO_OCCITANIE_CITY_ALIASES = {
+ATMO_OCCITANIE_CITY_ALIASES: Final[dict[str, str]] = {
     "toulouse": "31555",
     "toulouse metropole": "31555",
     "montpellier": "34172",
@@ -245,11 +111,7 @@ ATMO_OCCITANIE_CITY_ALIASES = {
     "grand montauban": "82121",
 }
 
-
-# Slugs des pages publiques ATMO Occitanie testées/validées pour compléter
-# les communes d'Occitanie absentes du flux national. On ne déduit rien :
-# si la page ne répond pas ou ne contient pas d'indice exploitable, la ville reste NULL.
-ATMO_OCCITANIE_PAGE_SLUGS = {
+ATMO_OCCITANIE_PAGE_SLUGS: Final[dict[str, str]] = {
     "31555": "toulouse",
     "34172": "montpellier",
     "30189": "nimes",
@@ -278,10 +140,7 @@ ATMO_OCCITANIE_PAGE_SLUGS = {
     "46042": "cahors",
 }
 
-# Pages publiques Air Breizh testées/validées.
-# Certaines villes bretonnes (Lanester, Concarneau, Fougères, Lannion) n'ont pas
-# de page ville directe exploitable chez Air Breizh : elles restent NULL.
-AIR_BREIZH_PAGE_SLUGS = {
+AIR_BREIZH_PAGE_SLUGS: Final[dict[str, str]] = {
     "35238": "rennes",
     "29019": "brest",
     "29232": "quimper",
@@ -292,19 +151,72 @@ AIR_BREIZH_PAGE_SLUGS = {
 }
 
 
-def _strip_accents(s: str) -> str:
-    s = str(s or "").strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = re.sub(r"[^a-z0-9]+", " ", s)
-    return " ".join(s.split())
+def _headers() -> dict[str, str]:
+    """Retourne les headers HTTP utilisés par l'ingestion."""
+    return {"User-Agent": USER_AGENT}
 
 
-def _score_atmo_from_label(v) -> Optional[float]:
-    if v is None:
-        return None
+def _strip_accents(value: Any) -> str:
+    """Normalise une chaîne pour comparaison robuste."""
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
 
-    s = _strip_accents(v)
+
+def _normalize_insee_code(value: Any) -> str:
+    """
+    Normalise un code INSEE.
+
+    Gère :
+    - 75056.0 ;
+    - 01053 ;
+    - 2A004 / 2B033.
+    """
+    raw = str(value or "").strip().upper()
+    raw = re.sub(r"\.0$", "", raw)
+    raw = raw.replace(" ", "")
+
+    if not raw:
+        return ""
+
+    if re.fullmatch(r"2[AB]\d{3}", raw):
+        return raw
+
+    if re.fullmatch(r"\d{1,5}", raw):
+        return raw.zfill(5)
+
+    match = re.search(r"\b(\d{5})\b", raw)
+
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def _lower_column_map(dataframe: pd.DataFrame) -> dict[str, str]:
+    """Construit un mapping nom_colonne_normalisé -> nom_colonne_original."""
+    return {
+        _strip_accents(column).replace(" ", "_"): str(column).strip()
+        for column in dataframe.columns
+    }
+
+
+def _score_atmo_from_label(value: Any) -> float | None:
+    """
+    Convertit un libellé ATMO en score CityMatch 0-10.
+
+    Échelle utilisée :
+    - bon → 10 ;
+    - moyen → 8 ;
+    - dégradé → 6 ;
+    - mauvais → 4 ;
+    - très mauvais → 2 ;
+    - extrêmement mauvais → 0.
+    """
+    text = _strip_accents(value)
+
     mapping = [
         ("extremement mauvais", 0.0),
         ("tres mauvais", 2.0),
@@ -313,289 +225,497 @@ def _score_atmo_from_label(v) -> Optional[float]:
         ("moyen", 8.0),
         ("bon", 10.0),
     ]
-    for key, score in mapping:
-        if key in s:
+
+    for label, score in mapping:
+        if label in text:
             return score
+
     return None
 
 
-def _score_atmo_from_numeric(v) -> Optional[float]:
-    num = to_float(v)
-    if num is None:
+def _score_atmo_from_index(value: Any) -> float | None:
+    """
+    Convertit un indice ATMO numérique 1-6 en score CityMatch 0-10.
+
+    Indice ATMO :
+    1 = bon, 6 = extrêmement mauvais.
+    """
+    number = to_float(value)
+
+    if number is None:
         return None
 
-    # Indice ATMO usuel : 1=bon, 2=moyen, 3=dégradé, 4=mauvais,
-    # 5=très mauvais, 6=extrêmement mauvais.
-    if 1 <= num <= 6:
-        return max(0.0, min(10.0, 10.0 - (num - 1.0) * 2.0))
-
-    # Certains exports peuvent déjà fournir un score 0-10.
-    if 0 <= num <= 10:
-        return max(0.0, min(10.0, num))
+    if 1 <= number <= 6:
+        return round(max(0.0, min(10.0, 10.0 - (number - 1.0) * 2.0)), 1)
 
     return None
+
+
+def _score_direct_0_10(value: Any) -> float | None:
+    """Interprète une colonne déjà exprimée sur 0-10."""
+    number = to_float(value)
+
+    if number is None:
+        return None
+
+    if 0 <= number <= 10:
+        return round(max(0.0, min(10.0, number)), 1)
+
+    return None
+
+
+def _guess_download_suffix(url: str, fmt: str = "") -> str:
+    """Déduit l'extension locale d'une ressource téléchargée."""
+    blob = f"{url} {fmt}".lower()
+
+    if ".zip" in blob or "zip" == fmt.lower():
+        return ".zip"
+
+    if ".gz" in blob or "gzip" in blob:
+        return ".csv.gz"
+
+    if ".json" in blob or "geojson" in blob or "json" == fmt.lower():
+        return ".json"
+
+    return ".csv"
+
+
+def _is_probably_html(first_chunk: bytes) -> bool:
+    """Détecte une page HTML/API doc téléchargée par erreur."""
+    head = first_chunk.decode("utf-8", errors="ignore").lower()
+    return "<html" in head or "swagger" in head or "openapi" in head
+
+
+def _write_stream_to_file(
+    response: requests.Response,
+    target_path: Path,
+) -> bool:
+    """Écrit une réponse streamée vers un fichier temporaire puis remplace la cible."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_suffix(target_path.suffix + ".part")
+
+    first_chunk = b""
+
+    with temp_path.open("wb") as file:
+        for chunk in response.iter_content(DOWNLOAD_CHUNK_SIZE):
+            if not chunk:
+                continue
+
+            if not first_chunk:
+                first_chunk = chunk[:200]
+
+            file.write(chunk)
+
+    if _is_probably_html(first_chunk):
+        temp_path.unlink(missing_ok=True)
+        return False
+
+    if not temp_path.exists() or temp_path.stat().st_size < MIN_CACHE_SIZE_BYTES:
+        temp_path.unlink(missing_ok=True)
+        return False
+
+    temp_path.replace(target_path)
+    return True
+
+
+def _download_data_gouv_atmo_resource(
+    query: str,
+    cache_filename: str,
+) -> Path | None:
+    """
+    Recherche et télécharge une ressource CSV/ZIP/JSON exploitable depuis data.gouv.fr.
+
+    Cette fonction est volontairement spécifique à ATMO pour éviter de récupérer
+    une documentation HTML ou un PDF non exploitable.
+    """
+    cache_path = CACHE_DIR / cache_filename
+
+    if cache_path.exists() and cache_path.stat().st_size > MIN_CACHE_SIZE_BYTES:
+        return cache_path
+
+    api_url = "https://www.data.gouv.fr/api/1/datasets/"
+
+    try:
+        response = requests.get(
+            api_url,
+            params={"q": query, "page_size": 10},
+            timeout=HTTP_TIMEOUT,
+            headers=_headers(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        console.print(f"[yellow]⚠️  Recherche data.gouv ATMO impossible : {exc}[/yellow]")
+        return None
+
+    datasets = payload.get("data", [])
+
+    if not isinstance(datasets, list):
+        return None
+
+    candidates: list[tuple[int, str, str]] = []
+
+    for dataset in datasets:
+        if not isinstance(dataset, dict):
+            continue
+
+        dataset_title = str(dataset.get("title") or "")
+
+        for resource in dataset.get("resources", []) or []:
+            if not isinstance(resource, dict):
+                continue
+
+            url = str(resource.get("url") or "")
+            title = str(resource.get("title") or resource.get("description") or "")
+            fmt = str(resource.get("format") or "")
+            blob = f"{dataset_title} {title} {fmt} {url}".lower()
+
+            if not url.startswith("http"):
+                continue
+
+            score = 0
+
+            if "csv" in blob:
+                score += 50
+            if "zip" in blob:
+                score += 25
+            if "json" in blob or "geojson" in blob:
+                score += 15
+            if "indice" in blob:
+                score += 15
+            if "atmo" in blob:
+                score += 15
+            if "commune" in blob or "communal" in blob:
+                score += 15
+            if "qualite" in blob or "qualité" in blob:
+                score += 10
+            if "air" in blob:
+                score += 10
+
+            if any(bad in blob for bad in ["api/doc", "documentation", ".pdf", "html", "swagger"]):
+                score -= 200
+
+            if score > 0:
+                candidates.append((score, url, fmt))
+
+    candidates.sort(reverse=True)
+
+    for score, url, fmt in candidates:
+        suffix = _guess_download_suffix(url, fmt)
+        target_path = cache_path.with_suffix(suffix)
+
+        try:
+            console.print(f"[blue]⬇️  Téléchargement data.gouv ATMO : {url}[/blue]")
+
+            with requests.get(
+                url,
+                timeout=HTTP_TIMEOUT,
+                stream=True,
+                headers=_headers(),
+            ) as response:
+                if response.status_code != 200:
+                    console.print(f"[yellow]⚠️  HTTP {response.status_code} pour {url}[/yellow]")
+                    continue
+
+                if _write_stream_to_file(response, target_path):
+                    console.print(
+                        f"[green]✅ Ressource data.gouv ATMO : {target_path.name} "
+                        f"({target_path.stat().st_size // 1024} KB, score={score})[/green]"
+                    )
+                    return target_path
+
+                console.print("[yellow]⚠️  Ressource data.gouv ATMO ignorée : contenu inexploitable[/yellow]")
+
+        except Exception as exc:
+            console.print(f"[yellow]⚠️  Téléchargement data.gouv ATMO impossible : {exc}[/yellow]")
+
+    return None
+
+
+def _build_score_from_columns(
+    dataframe: pd.DataFrame,
+    index: pd.Index,
+    score_col: str | None,
+    idx_col: str | None,
+    label_col: str | None,
+) -> pd.Series:
+    """Construit une série de scores 0-10 depuis les colonnes détectées."""
+    if score_col:
+        return dataframe.loc[index, score_col].map(_score_direct_0_10)
+
+    if idx_col:
+        scores = dataframe.loc[index, idx_col].map(_score_atmo_from_index)
+
+        if scores.dropna().empty and label_col:
+            scores = dataframe.loc[index, label_col].map(_score_atmo_from_label)
+
+        return scores
+
+    if label_col:
+        return dataframe.loc[index, label_col].map(_score_atmo_from_label)
+
+    return pd.Series([None] * len(index), index=index)
 
 
 def _normalize_atmo_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalise un export ATMO en table communale :
         code_insee, qualite_air_score
-
-    Formats acceptés :
-    - score déjà calculé : qualite_air_score / score_air / air_score ;
-    - indice ATMO numérique : indice_atmo / code_qual / code_qualite ;
-    - libellé qualité : Bon, Moyen, Dégradé, Mauvais, Très mauvais, Extrêmement mauvais.
-
-    Aucun score n'est inventé : si aucune source ne donne la commune, le score reste NULL.
     """
     if raw_df.empty:
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
-    df = raw_df.copy()
-    df.columns = [str(c).strip().replace("\ufeff", "") for c in df.columns]
-    lower = {c.lower(): c for c in df.columns}
+    dataframe = raw_df.copy()
+    dataframe.columns = [str(column).strip().replace("\ufeff", "") for column in dataframe.columns]
+    column_map = _lower_column_map(dataframe)
 
     code_col = next(
         (
-            lower.get(name)
+            column_map.get(name)
             for name in [
-                "code_insee", "codgeo", "code_commune", "code_com", "insee",
-                "code_zone", "code_zone_insee", "commune_code", "code territoire",
-                "code_territoire", "code collectivite", "code_collectivite",
+                "code_insee",
+                "codgeo",
+                "code_commune",
+                "code_com",
+                "insee",
+                "commune_code",
+                "code_zone",
+                "code_zone_insee",
+                "code_territoire",
+                "code_collectivite",
             ]
-            if lower.get(name) is not None
+            if column_map.get(name) is not None
         ),
         None,
     )
 
     score_col = next(
         (
-            c for c in df.columns
-            if c.lower() in {"qualite_air_score", "score_air", "air_score", "score"}
+            column
+            for column in dataframe.columns
+            if _strip_accents(column).replace(" ", "_")
+            in {"qualite_air_score", "score_air", "air_score", "score"}
         ),
         None,
     )
+
     idx_col = next(
         (
-            c for c in df.columns
-            if c.lower() in {
-                "indice_atmo", "indice", "code_qual", "code_qualite",
-                "qualite", "code_qual_air", "valeur_indice", "code indice",
-                "code_indice", "indice qualité air", "indice_qualite_air",
+            column
+            for column in dataframe.columns
+            if _strip_accents(column).replace(" ", "_")
+            in {
+                "indice_atmo",
+                "indice",
+                "code_qual",
+                "code_qualite",
+                "qualite",
+                "code_qual_air",
+                "valeur_indice",
+                "code_indice",
+                "indice_qualite_air",
             }
         ),
         None,
     )
+
     label_col = next(
         (
-            c for c in df.columns
+            column
+            for column in dataframe.columns
             if any(
-                k in c.lower()
-                for k in [
-                    "lib_qual", "qualificatif", "libelle", "libellé",
-                    "qualite de l air", "qualité de l'air", "libelle_indice",
-                    "lib_indice",
+                keyword in _strip_accents(column)
+                for keyword in [
+                    "lib qual",
+                    "qualificatif",
+                    "libelle",
+                    "qualite de l air",
+                    "libelle indice",
+                    "lib indice",
                 ]
             )
         ),
         None,
     )
 
-    def build_score(index) -> pd.Series:
-        if score_col:
-            vals = pd.to_numeric(
-                df.loc[index, score_col].astype(str).str.replace(",", ".", regex=False),
-                errors="coerce",
-            )
-            return vals.clip(lower=0, upper=10)
-
-        if idx_col:
-            scores = df.loc[index, idx_col].map(_score_atmo_from_numeric)
-            # Si la colonne numérique ne marche pas, essayer le libellé.
-            if scores.dropna().empty and label_col:
-                scores = df.loc[index, label_col].map(_score_atmo_from_label)
-            return scores
-
-        if label_col:
-            return df.loc[index, label_col].map(_score_atmo_from_label)
-
-        return pd.Series([None] * len(index), index=index)
-
-    frames: list[pd.DataFrame] = []
-
-    # Cas normal : code INSEE communal directement disponible.
-    if code_col:
-        out = pd.DataFrame(index=df.index)
-        out["code_insee"] = (
-            df[code_col]
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\.0$", "", regex=True)
-        )
-
-        # Extraire un code commune à 5 chiffres même si le champ contient
-        # un préfixe ou une chaîne plus longue.
-        extracted = out["code_insee"].str.extract(r"(\d{5})", expand=False)
-        out["code_insee"] = extracted.fillna(out["code_insee"]).str.zfill(5)
-        out = out[out["code_insee"].str.match(r"^\d{5}$", na=False)]
-
-        if not out.empty:
-            out["qualite_air_score"] = build_score(out.index)
-            frames.append(out[["code_insee", "qualite_air_score"]])
-
-    if not frames:
+    if not code_col:
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
-    out_all = pd.concat(frames, ignore_index=True)
-    out_all["qualite_air_score"] = pd.to_numeric(out_all["qualite_air_score"], errors="coerce")
-    out_all = out_all.dropna(subset=["code_insee", "qualite_air_score"])
-    if out_all.empty:
+    out = pd.DataFrame(index=dataframe.index)
+    out["code_insee"] = dataframe[code_col].map(_normalize_insee_code)
+    out = out[out["code_insee"].str.match(r"^(\d{5}|2[AB]\d{3})$", na=False)]
+
+    if out.empty:
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
-    out_all["qualite_air_score"] = out_all["qualite_air_score"].clip(lower=0, upper=10)
-    out_all = out_all.groupby("code_insee", as_index=False)["qualite_air_score"].median()
-    out_all["qualite_air_score"] = out_all["qualite_air_score"].round(1)
-    return out_all
+    out["qualite_air_score"] = _build_score_from_columns(
+        dataframe=dataframe,
+        index=out.index,
+        score_col=score_col,
+        idx_col=idx_col,
+        label_col=label_col,
+    )
+
+    out["qualite_air_score"] = pd.to_numeric(out["qualite_air_score"], errors="coerce")
+    out = out.dropna(subset=["code_insee", "qualite_air_score"])
+
+    if out.empty:
+        return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
+
+    out["qualite_air_score"] = out["qualite_air_score"].clip(lower=0, upper=10)
+    out = out.groupby("code_insee", as_index=False)["qualite_air_score"].median()
+    out["qualite_air_score"] = out["qualite_air_score"].round(1)
+
+    return out
+
+
+def _score_from_row(
+    row: pd.Series,
+    score_col: str | None,
+    idx_col: str | None,
+    label_col: str | None,
+) -> float | None:
+    """Calcule un score depuis une ligne ATMO."""
+    if score_col:
+        score = _score_direct_0_10(row.get(score_col))
+
+        if score is not None:
+            return score
+
+    if idx_col:
+        score = _score_atmo_from_index(row.get(idx_col))
+
+        if score is not None:
+            return score
+
+    if label_col:
+        score = _score_atmo_from_label(row.get(label_col))
+
+        if score is not None:
+            return score
+
+    return None
 
 
 def _normalize_atmo_occitanie_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Normalise le jeu ATMO Occitanie en vraie donnée CityMatch.
+    Normalise le jeu ATMO Occitanie.
 
-    Important :
-    - Le jeu régional est souvent à l'échelle des EPCI/collectivités, pas toujours
-      à l'échelle du code INSEE communal.
-    - Quand un vrai code INSEE communal est présent, on l'utilise.
-    - Sinon on rattache uniquement les villes connues via le nom de zone
-      publié par ATMO Occitanie, par exemple :
-          "Toulouse Métropole - Toulouse" → 31555
-          "Montpellier Méditerranée Métropole - Montpellier" → 34172
-    - Aucun score n'est estimé : on utilise seulement l'indice/libellé présent
-      dans la source ATMO Occitanie.
+    Si un vrai code INSEE communal est présent, il est utilisé.
+    Sinon, certains territoires publiés par ATMO Occitanie sont rattachés à une
+    ville centrale connue, sans inventer de score.
     """
     if raw_df.empty:
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
-    df = raw_df.copy()
-    df.columns = [str(c).strip().replace("\ufeff", "") for c in df.columns]
+    dataframe = raw_df.copy()
+    dataframe.columns = [str(column).strip().replace("\ufeff", "") for column in dataframe.columns]
+    column_map = _lower_column_map(dataframe)
 
-    def norm_col(c: str) -> str:
-        return _strip_accents(c).replace(" ", "_")
-
-    norm_to_col = {norm_col(c): c for c in df.columns}
-
-    # ── 1) Colonnes de score / indice ───────────────────────────────────────
     score_col = next(
         (
-            norm_to_col.get(name)
-            for name in [
-                "qualite_air_score", "score_air", "air_score", "score",
-            ]
-            if norm_to_col.get(name) is not None
+            column_map.get(name)
+            for name in ["qualite_air_score", "score_air", "air_score", "score"]
+            if column_map.get(name) is not None
         ),
         None,
     )
 
     idx_col = next(
         (
-            norm_to_col.get(name)
+            column_map.get(name)
             for name in [
-                "code_qual", "code_qualite", "indice_atmo", "indice",
-                "valeur_indice", "code_indice", "code_qual_air",
+                "code_qual",
+                "code_qualite",
+                "indice_atmo",
+                "indice",
+                "valeur_indice",
+                "code_indice",
+                "code_qual_air",
             ]
-            if norm_to_col.get(name) is not None
+            if column_map.get(name) is not None
         ),
         None,
     )
 
     label_col = next(
         (
-            norm_to_col.get(name)
+            column_map.get(name)
             for name in [
-                "lib_qual", "libelle_qualite", "lib_qual_air",
-                "qualificatif", "libelle_indice", "qualite",
+                "lib_qual",
+                "libelle_qualite",
+                "lib_qual_air",
+                "qualificatif",
+                "libelle_indice",
+                "qualite",
             ]
-            if norm_to_col.get(name) is not None
+            if column_map.get(name) is not None
         ),
         None,
     )
 
-    # Fallback colonnes score : éviter de confondre lib_zone avec lib_qual.
-    if not label_col:
-        label_col = next(
-            (
-                c for c in df.columns
-                if any(k in norm_col(c) for k in ["qual", "indice"])
-                and not any(k in norm_col(c) for k in ["zone", "territoire", "collectiv", "epci"])
-            ),
-            None,
-        )
-
     if not any([score_col, idx_col, label_col]):
-        console.print(f"[yellow]⚠️  ATMO Occitanie : colonne indice introuvable. Colonnes={list(df.columns)}[/yellow]")
+        console.print(
+            f"[yellow]⚠️  ATMO Occitanie : colonne indice introuvable. "
+            f"Colonnes={list(dataframe.columns)}[/yellow]"
+        )
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
-    def row_score(row) -> Optional[float]:
-        score = None
-        if score_col:
-            score = to_float(row.get(score_col))
-            if score is not None:
-                return round(max(0.0, min(10.0, float(score))), 1)
+    rows: list[dict[str, Any]] = []
 
-        if idx_col:
-            score = _score_atmo_from_numeric(row.get(idx_col))
-            if score is not None:
-                return round(float(score), 1)
-
-        if label_col:
-            score = _score_atmo_from_label(row.get(label_col))
-            if score is not None:
-                return round(float(score), 1)
-
-        return None
-
-    rows = []
-
-    # ── 2) Cas code communal direct ──────────────────────────────────────────
     code_col = next(
         (
-            norm_to_col.get(name)
+            column_map.get(name)
             for name in [
-                "code_insee", "codgeo", "code_commune", "code_com",
-                "insee", "code_insee_commune", "commune_code",
+                "code_insee",
+                "codgeo",
+                "code_commune",
+                "code_com",
+                "insee",
+                "code_insee_commune",
+                "commune_code",
             ]
-            if norm_to_col.get(name) is not None
+            if column_map.get(name) is not None
         ),
         None,
     )
 
     if code_col:
-        for _, row in df.iterrows():
-            raw_code = str(row.get(code_col, "")).strip()
-            raw_code = re.sub(r"\.0$", "", raw_code)
+        for _, row in dataframe.iterrows():
+            code = _normalize_insee_code(row.get(code_col))
 
-            # On accepte uniquement un vrai code INSEE communal à 5 chiffres.
-            # Les codes EPCI/SIREN à 9 chiffres ne sont PAS utilisés ici.
-            m = re.fullmatch(r"\d{5}", raw_code)
-            if not m:
+            if not re.fullmatch(r"\d{5}", code):
                 continue
 
-            score = row_score(row)
-            if score is not None:
-                rows.append({"code_insee": raw_code, "qualite_air_score": score})
+            score = _score_from_row(
+                row=row,
+                score_col=score_col,
+                idx_col=idx_col,
+                label_col=label_col,
+            )
 
-    # ── 3) Cas zone/territoire sans code INSEE communal ─────────────────────
-    # Choix volontaire : on évite les colonnes lib_qual/libellé indice.
+            if score is not None:
+                rows.append({"code_insee": code, "qualite_air_score": score})
+
     zone_col = next(
         (
-            norm_to_col.get(name)
+            column_map.get(name)
             for name in [
-                "lib_zone", "nom_zone", "zone", "nom_territoire",
-                "territoire", "collectivite", "nom_collectivite",
-                "lib_collectivite", "epci", "nom_epci", "lib_epci",
-                "nom", "name",
+                "lib_zone",
+                "nom_zone",
+                "zone",
+                "nom_territoire",
+                "territoire",
+                "collectivite",
+                "nom_collectivite",
+                "lib_collectivite",
+                "epci",
+                "nom_epci",
+                "lib_epci",
+                "nom",
+                "name",
             ]
-            if norm_to_col.get(name) is not None
+            if column_map.get(name) is not None
         ),
         None,
     )
@@ -603,9 +723,10 @@ def _normalize_atmo_occitanie_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     if not zone_col:
         zone_col = next(
             (
-                c for c in df.columns
-                if any(k in norm_col(c) for k in ["zone", "territoire", "collectiv", "epci"])
-                and not any(k in norm_col(c) for k in ["qual", "indice", "polluant"])
+                column
+                for column in dataframe.columns
+                if any(keyword in _strip_accents(column) for keyword in ["zone", "territoire", "collectiv", "epci"])
+                and not any(keyword in _strip_accents(column) for keyword in ["qual", "indice", "polluant"])
             ),
             None,
         )
@@ -616,13 +737,15 @@ def _normalize_atmo_occitanie_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
             for name, code in ATMO_OCCITANIE_CITY_ALIASES.items()
         }
 
-        for _, row in df.iterrows():
+        for _, row in dataframe.iterrows():
             zone = _strip_accents(row.get(zone_col, ""))
+
             if not zone:
                 continue
 
             matched_code = None
-            for alias, code in sorted(aliases.items(), key=lambda kv: len(kv[0]), reverse=True):
+
+            for alias, code in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
                 if alias and alias in zone:
                     matched_code = code
                     break
@@ -630,77 +753,93 @@ def _normalize_atmo_occitanie_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
             if not matched_code:
                 continue
 
-            score = row_score(row)
+            score = _score_from_row(
+                row=row,
+                score_col=score_col,
+                idx_col=idx_col,
+                label_col=label_col,
+            )
+
             if score is not None:
                 rows.append({"code_insee": matched_code, "qualite_air_score": score})
 
     if not rows:
         console.print(
             "[yellow]⚠️  ATMO Occitanie : aucune ville rattachée. "
-            f"Colonnes={list(df.columns)}[/yellow]"
+            f"Colonnes={list(dataframe.columns)}[/yellow]"
         )
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
     out = pd.DataFrame(rows)
-    out["code_insee"] = out["code_insee"].astype(str).str.zfill(5)
+    out["code_insee"] = out["code_insee"].map(_normalize_insee_code)
     out["qualite_air_score"] = pd.to_numeric(out["qualite_air_score"], errors="coerce")
-    out = out.dropna(subset=["qualite_air_score"])
-
-    # La source contient plusieurs jours : on garde la médiane annuelle/disponible,
-    # comme pour le national, pour ne pas dépendre d'une seule journée.
+    out = out.dropna(subset=["code_insee", "qualite_air_score"])
+    out["qualite_air_score"] = out["qualite_air_score"].clip(lower=0, upper=10)
     out = out.groupby("code_insee", as_index=False)["qualite_air_score"].median()
-    out["qualite_air_score"] = out["qualite_air_score"].clip(lower=0, upper=10).round(1)
+    out["qualite_air_score"] = out["qualite_air_score"].round(1)
 
     console.print(
-        f"[dim]ATMO Occitanie codes rattachés : "
+        "[dim]ATMO Occitanie codes rattachés : "
         f"{', '.join(sorted(out['code_insee'].astype(str).unique())[:20])}"
         f"{'...' if len(out) > 20 else ''}[/dim]"
     )
+
     return out
 
 
-def _read_atmo_occitanie_file(path: Path) -> pd.DataFrame:
-    """Lit CSV ou GeoJSON ATMO Occitanie."""
+def _read_atmo_file(path: Path) -> pd.DataFrame:
+    """Lit un fichier ATMO CSV, JSON ou GeoJSON."""
     if not path.exists():
         return pd.DataFrame()
 
-    if path.suffix.lower() in {".geojson", ".json"}:
+    suffix = path.suffix.lower()
+
+    if suffix in {".geojson", ".json"}:
         try:
             data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-            features = data.get("features", [])
-            records = []
-            for feat in features:
-                props = feat.get("properties") or {}
-                if props:
-                    records.append(props)
-            return pd.DataFrame(records)
         except Exception:
             return pd.DataFrame()
+
+        features = data.get("features")
+
+        if isinstance(features, list):
+            records = [
+                feature.get("properties") or {}
+                for feature in features
+                if isinstance(feature, dict)
+            ]
+            return pd.DataFrame(records)
+
+        if isinstance(data, list):
+            return pd.DataFrame(data)
+
+        if isinstance(data, dict):
+            return pd.DataFrame(data.get("data", []))
+
+        return pd.DataFrame()
 
     return read_csv_flexible(path)
 
 
-def _download_atmo_occitanie() -> Optional[Path]:
-    """
-    Télécharge l'export ATMO Occitanie.
-
-    On valide le contenu avant de garder le cache :
-    l'ancien problème venait souvent d'un cache existant mais inexploitable
-    ou d'un export où la colonne zone était mal détectée.
-    """
+def _download_atmo_occitanie() -> Path | None:
+    """Télécharge l'export ATMO Occitanie si disponible et exploitable."""
     cache_csv = CACHE_DIR / "atmo_occitanie_collectivites.csv"
     cache_geojson = CACHE_DIR / "atmo_occitanie_collectivites.geojson"
 
-    # Cache CSV/GeoJSON seulement s'il se normalise vraiment.
-    for existing in [cache_csv, cache_geojson]:
-        if existing.exists() and existing.stat().st_size > 1000:
-            raw = _read_atmo_occitanie_file(existing)
-            norm = _normalize_atmo_occitanie_dataframe(raw)
-            if not norm.empty:
-                console.print(f"[dim]Cache ATMO Occitanie valide : {existing.name} ({existing.stat().st_size // 1024} KB)[/dim]")
-                return existing
-            console.print(f"[yellow]⚠️  Cache ATMO Occitanie inexploitable ignoré : {existing.name}[/yellow]")
-            existing.unlink(missing_ok=True)
+    for existing_path in (cache_csv, cache_geojson):
+        if existing_path.exists() and existing_path.stat().st_size > MIN_CACHE_SIZE_BYTES:
+            raw = _read_atmo_file(existing_path)
+            normalized = _normalize_atmo_occitanie_dataframe(raw)
+
+            if not normalized.empty:
+                console.print(
+                    f"[dim]Cache ATMO Occitanie valide : {existing_path.name} "
+                    f"({existing_path.stat().st_size // 1024} KB)[/dim]"
+                )
+                return existing_path
+
+            console.print(f"[yellow]⚠️  Cache ATMO Occitanie inexploitable ignoré : {existing_path.name}[/yellow]")
+            existing_path.unlink(missing_ok=True)
 
     for url in ATMO_OCCITANIE_URLS:
         is_geojson = "f=geojson" in url.lower()
@@ -708,29 +847,31 @@ def _download_atmo_occitanie() -> Optional[Path]:
 
         try:
             console.print("[blue]⬇️  Téléchargement ATMO Occitanie...[/blue]")
-            with requests.get(url, timeout=HTTP_TIMEOUT, stream=True, headers={"User-Agent": "CityMatch/1.0"}) as resp:
-                if resp.status_code != 200:
-                    console.print(f"[yellow]⚠️  ATMO Occitanie HTTP {resp.status_code}[/yellow]")
+
+            with requests.get(
+                url,
+                timeout=HTTP_TIMEOUT,
+                stream=True,
+                headers=_headers(),
+            ) as response:
+                if response.status_code != 200:
+                    console.print(f"[yellow]⚠️  ATMO Occitanie HTTP {response.status_code}[/yellow]")
                     continue
 
-                tmp = cache_path.with_suffix(cache_path.suffix + ".part")
-                with open(tmp, "wb") as f:
-                    for chunk in resp.iter_content(8192):
-                        if chunk:
-                            f.write(chunk)
-                tmp.replace(cache_path)
+                if not _write_stream_to_file(response, cache_path):
+                    console.print("[yellow]⚠️  ATMO Occitanie téléchargé mais inexploitable[/yellow]")
+                    continue
 
-            if cache_path.exists() and cache_path.stat().st_size > 1000:
-                raw = _read_atmo_occitanie_file(cache_path)
-                norm = _normalize_atmo_occitanie_dataframe(raw)
-                if not norm.empty:
-                    console.print(
-                        f"[green]✅ ATMO Occitanie ({cache_path.stat().size if False else cache_path.stat().st_size / 1024 / 1024:.1f} MB)[/green]"
-                    )
-                    return cache_path
+            raw = _read_atmo_file(cache_path)
+            normalized = _normalize_atmo_occitanie_dataframe(raw)
 
-                console.print(f"[yellow]⚠️  ATMO Occitanie téléchargé mais non reconnu : {url}[/yellow]")
-                cache_path.unlink(missing_ok=True)
+            if not normalized.empty:
+                console.print(
+                    f"[green]✅ ATMO Occitanie ({cache_path.stat().st_size / 1024 / 1024:.1f} MB)[/green]"
+                )
+                return cache_path
+
+            cache_path.unlink(missing_ok=True)
 
         except Exception as exc:
             console.print(f"[yellow]⚠️  ATMO Occitanie indisponible : {exc}[/yellow]")
@@ -753,48 +894,49 @@ def _label_from_atmo_score(score: float) -> str:
     return "extrêmement mauvais"
 
 
-def _extract_atmo_score_from_html(page_html: str) -> tuple[Optional[float], Optional[str], str]:
+def _extract_atmo_score_from_html(page_html: str) -> tuple[float | None, str | None, str]:
     """
     Extrait un indice ATMO depuis une page publique régionale.
 
-    Stratégies :
-    - valeur numérique 1..6 proche de champs indice/iqa/code_qual ;
-    - libellé ATMO avec contexte "indice", "qualité de l'air", etc.
-
-    Retour : (score CityMatch 0-10, libellé, méthode). Si rien de fiable :
-    (None, None, "not_found").
+    Retour :
+        (score, label, méthode)
     """
     raw = str(page_html or "")
     normalized = _strip_accents(raw)
 
-    # 1) Patterns numériques. Sur les pages ATMO Occitanie, c'est ce qui a été
-    # validé en test : Toulouse → score 4.0 / label mauvais.
     numeric_patterns = [
         r'"(?:indice|code_qual|codeQual|qualite|iqa)"\s*:\s*"?([1-6])"?',
         r"(?:indice|qualite|iqa)[^0-9]{0,40}([1-6])",
     ]
-    for pat in numeric_patterns:
-        m = re.search(pat, raw, flags=re.IGNORECASE)
-        if m:
-            score = _score_atmo_from_numeric(m.group(1))
-            if score is not None:
-                return round(float(score), 1), _label_from_atmo_score(float(score)), "numeric_pattern"
 
-    # 2) Patterns textuels Air Breizh / pages publiques.
+    for pattern in numeric_patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+
+        if not match:
+            continue
+
+        score = _score_atmo_from_index(match.group(1))
+
+        if score is not None:
+            return round(float(score), 1), _label_from_atmo_score(float(score)), "numeric_pattern"
+
     label_patterns = [
         r"indice\s+du\s+jour\s+(bon|moyen|degrade|dégradé|mauvais|tres mauvais|très mauvais|extremement mauvais|extrêmement mauvais)",
         r"qualite\s+de\s+l\s+air[^a-z0-9]{0,80}(bon|moyen|degrade|mauvais|tres mauvais|extremement mauvais)",
     ]
-    for pat in label_patterns:
-        m = re.search(pat, normalized, flags=re.IGNORECASE)
-        if m:
-            label = m.group(1)
-            score = _score_atmo_from_label(label)
-            if score is not None:
-                return round(float(score), 1), label, "label_pattern"
 
-    # 3) Fallback contextuel prudent : on exige que le libellé soit proche
-    # d'un vocabulaire d'indice/air pour éviter de prendre une légende générique.
+    for pattern in label_patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+
+        if not match:
+            continue
+
+        label = match.group(1)
+        score = _score_atmo_from_label(label)
+
+        if score is not None:
+            return round(float(score), 1), label, "label_pattern"
+
     label_candidates = [
         ("extrêmement mauvais", ["extremement mauvais", "extrêmement mauvais"]),
         ("très mauvais", ["tres mauvais", "très mauvais"]),
@@ -803,41 +945,52 @@ def _extract_atmo_score_from_html(page_html: str) -> tuple[Optional[float], Opti
         ("moyen", ["moyen"]),
         ("bon", ["bon"]),
     ]
-    context_words = ["indice", "indice du jour", "qualite de l air", "qualite", "air", "iqa", "aujourd hui", "prevision"]
-    best = None
+    context_words = [
+        "indice",
+        "indice du jour",
+        "qualite de l air",
+        "qualite",
+        "air",
+        "iqa",
+        "aujourd hui",
+        "prevision",
+    ]
+
+    best: tuple[int, str] | None = None
 
     for label, variants in label_candidates:
         for variant in variants:
-            v = _strip_accents(variant)
-            for m in re.finditer(re.escape(v), normalized):
-                start = max(0, m.start() - 120)
-                end = min(len(normalized), m.end() + 120)
-                ctx = normalized[start:end]
-                context_score = sum(1 for w in context_words if w in ctx)
+            normalized_variant = _strip_accents(variant)
+
+            for match in re.finditer(re.escape(normalized_variant), normalized):
+                start = max(0, match.start() - 120)
+                end = min(len(normalized), match.end() + 120)
+                context = normalized[start:end]
+                context_score = sum(1 for word in context_words if word in context)
+
                 candidate = (context_score, label)
+
                 if best is None or candidate[0] > best[0]:
                     best = candidate
 
     if best and best[0] > 0:
         label = best[1]
         score = _score_atmo_from_label(label)
+
         if score is not None:
             return round(float(score), 1), label, f"label_context_{best[0]}"
 
     return None, None, "not_found"
 
 
-def _download_public_atmo_page(url: str, cache_name: str) -> Optional[str]:
-    """
-    Télécharge une page publique ATMO/Air Breizh avec cache local.
-    En cas d'erreur HTTP/timeout, on retourne None et la ville restera NULL.
-    """
+def _download_public_atmo_page(url: str, cache_name: str) -> str | None:
+    """Télécharge une page publique ATMO/Air Breizh avec cache local."""
     cache_path = CACHE_DIR / cache_name
 
-    if cache_path.exists() and cache_path.stat().st_size > 1000:
+    if cache_path.exists() and cache_path.stat().st_size > MIN_CACHE_SIZE_BYTES:
         try:
             return cache_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        except OSError:
             pass
 
     try:
@@ -845,249 +998,332 @@ def _download_public_atmo_page(url: str, cache_name: str) -> Optional[str]:
             url,
             timeout=45,
             headers={
-                "User-Agent": "CityMatch/1.0",
+                "User-Agent": USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
-        ) as resp:
-            if resp.status_code != 200:
-                console.print(f"[yellow]⚠️  ATMO page HTTP {resp.status_code} : {url}[/yellow]")
+        ) as response:
+            if response.status_code != 200:
+                console.print(f"[yellow]⚠️  ATMO page HTTP {response.status_code} : {url}[/yellow]")
                 return None
-            page = resp.text
+
+            page = response.text
             cache_path.write_text(page, encoding="utf-8", errors="replace")
             return page
+
     except Exception as exc:
         console.print(f"[yellow]⚠️  ATMO page inaccessible {url}: {exc}[/yellow]")
         return None
 
 
-def _load_atmo_occitanie_pages() -> pd.DataFrame:
-    """
-    Fallback réel ATMO Occitanie par pages publiques ville.
+def _build_air_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Construit un DataFrame code_insee / qualite_air_score depuis des lignes."""
+    if not rows:
+        return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
-    Utilisé quand le flux national et l'open data tabulaire ne donnent pas la
-    commune. Les pages ont été testées séparément avant intégration.
-    """
-    rows = []
+    dataframe = pd.DataFrame(rows)
+    dataframe["code_insee"] = dataframe["code_insee"].map(_normalize_insee_code)
+    dataframe["qualite_air_score"] = pd.to_numeric(dataframe["qualite_air_score"], errors="coerce")
+    dataframe = dataframe.dropna(subset=["code_insee", "qualite_air_score"])
+    dataframe = dataframe[dataframe["code_insee"] != ""]
+    dataframe["qualite_air_score"] = dataframe["qualite_air_score"].clip(lower=0, upper=10)
+    dataframe = dataframe.groupby("code_insee", as_index=False)["qualite_air_score"].median()
+    dataframe["qualite_air_score"] = dataframe["qualite_air_score"].round(1)
+
+    return dataframe
+
+
+def _load_atmo_occitanie_pages() -> pd.DataFrame:
+    """Fallback réel ATMO Occitanie par pages publiques ville."""
+    rows: list[dict[str, Any]] = []
+
     for code, slug in ATMO_OCCITANIE_PAGE_SLUGS.items():
         url = f"https://www.atmo-occitanie.org/{slug}?indice=iqa"
         page = _download_public_atmo_page(url, f"atmo_occitanie_page_{slug}.html")
+
         if not page:
             continue
 
         score, label, method = _extract_atmo_score_from_html(page)
+
         if score is None:
             console.print(f"[yellow]⚠️  ATMO Occitanie page non parsée : {slug} ({method})[/yellow]")
             continue
 
-        rows.append({"code_insee": str(code).zfill(5), "qualite_air_score": score})
+        rows.append(
+            {
+                "code_insee": _normalize_insee_code(code),
+                "qualite_air_score": score,
+            }
+        )
         console.print(f"[dim]ATMO Occitanie page : {slug} → {score}/10 ({label}, {method})[/dim]")
 
-    if not rows:
-        return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
-
-    out = pd.DataFrame(rows)
-    out = out.groupby("code_insee", as_index=False)["qualite_air_score"].median()
-    out["qualite_air_score"] = out["qualite_air_score"].round(1)
-    return out
+    return _build_air_dataframe(rows)
 
 
 def _load_air_breizh_pages() -> pd.DataFrame:
-    """
-    Fallback réel Air Breizh par pages publiques ville.
+    """Fallback réel Air Breizh par pages publiques ville."""
+    rows: list[dict[str, Any]] = []
 
-    Couverture validée :
-    Rennes, Brest, Quimper, Lorient, Vannes, Saint-Malo, Saint-Brieuc.
-    Les autres villes bretonnes sans page officielle exploitable restent NULL.
-    """
-    rows = []
     for code, slug in AIR_BREIZH_PAGE_SLUGS.items():
         url = f"https://www.airbreizh.asso.fr/ville/{slug}/"
         page = _download_public_atmo_page(url, f"airbreizh_page_{slug}.html")
+
         if not page:
             continue
 
         score, label, method = _extract_atmo_score_from_html(page)
+
         if score is None:
             console.print(f"[yellow]⚠️  Air Breizh page non parsée : {slug} ({method})[/yellow]")
             continue
 
-        rows.append({"code_insee": str(code).zfill(5), "qualite_air_score": score})
+        rows.append(
+            {
+                "code_insee": _normalize_insee_code(code),
+                "qualite_air_score": score,
+            }
+        )
         console.print(f"[dim]Air Breizh page : {slug} → {score}/10 ({label}, {method})[/dim]")
 
-    if not rows:
-        return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
-
-    out = pd.DataFrame(rows)
-    out = out.groupby("code_insee", as_index=False)["qualite_air_score"].median()
-    out["qualite_air_score"] = out["qualite_air_score"].round(1)
-    return out
+    return _build_air_dataframe(rows)
 
 
 def _merge_atmo_sources(parts: list[pd.DataFrame]) -> pd.DataFrame:
     """
     Fusionne les sources ATMO en conservant la première source disponible.
+
     Ordre attendu :
-    1. national/cache ;
+    1. national/local ;
     2. ATMO Occitanie open data ;
     3. ATMO Occitanie pages publiques ville ;
     4. Air Breizh pages publiques ville.
     """
-    clean_parts = []
+    clean_parts: list[pd.DataFrame] = []
+
     for part in parts:
         if part is None or part.empty:
             continue
-        p = part[["code_insee", "qualite_air_score"]].copy()
-        p["code_insee"] = p["code_insee"].astype(str).str.zfill(5)
-        p["qualite_air_score"] = pd.to_numeric(p["qualite_air_score"], errors="coerce")
-        p = p.dropna(subset=["code_insee", "qualite_air_score"])
-        p["qualite_air_score"] = p["qualite_air_score"].clip(lower=0, upper=10).round(1)
-        if not p.empty:
-            clean_parts.append(p)
+
+        if not {"code_insee", "qualite_air_score"}.issubset(part.columns):
+            continue
+
+        dataframe = part[["code_insee", "qualite_air_score"]].copy()
+        dataframe["code_insee"] = dataframe["code_insee"].map(_normalize_insee_code)
+        dataframe["qualite_air_score"] = pd.to_numeric(dataframe["qualite_air_score"], errors="coerce")
+        dataframe = dataframe.dropna(subset=["code_insee", "qualite_air_score"])
+        dataframe = dataframe[dataframe["code_insee"] != ""]
+        dataframe["qualite_air_score"] = dataframe["qualite_air_score"].clip(lower=0, upper=10).round(1)
+
+        if not dataframe.empty:
+            clean_parts.append(dataframe)
 
     if not clean_parts:
         return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
     merged = pd.concat(clean_parts, ignore_index=True)
     merged = merged.drop_duplicates(subset=["code_insee"], keep="first")
+
     return merged[["code_insee", "qualite_air_score"]]
+
+
+def _load_national_or_local_atmo_cache() -> pd.DataFrame:
+    """Charge un cache national/local ATMO existant si exploitable."""
+    for filename in ATMO_NATIONAL_CACHE_FILES:
+        path = CACHE_DIR / filename
+
+        if not path.exists():
+            continue
+
+        dataframe = read_csv_flexible(path)
+        normalized = _normalize_atmo_dataframe(dataframe)
+
+        if not normalized.empty:
+            console.print(f"[green]✅ ATMO cache national/local : {len(normalized):,} communes[/green]")
+            return normalized
+
+    return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
+
+
+def _load_downloaded_national_atmo() -> pd.DataFrame:
+    """Télécharge et normalise une source nationale ATMO via data.gouv si possible."""
+    downloaded = _download_data_gouv_atmo_resource(
+        query="indice qualité air quotidien commune indice atmo",
+        cache_filename="atmo_indice_qualite_air_commune.csv",
+    )
+
+    if downloaded is None or not downloaded.exists():
+        return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
+
+    try:
+        if downloaded.suffix.lower() == ".zip":
+            zip_parts: list[pd.DataFrame] = []
+
+            with zipfile.ZipFile(downloaded) as zip_file:
+                for name in zip_file.namelist():
+                    if not name.lower().endswith(".csv"):
+                        continue
+
+                    raw_path = CACHE_DIR / f"_atmo_extract_{Path(name).name}"
+
+                    with zip_file.open(name) as file:
+                        raw_path.write_bytes(file.read())
+
+                    raw = read_csv_flexible(raw_path)
+                    normalized = _normalize_atmo_dataframe(raw)
+
+                    if not normalized.empty:
+                        zip_parts.append(normalized)
+
+            if not zip_parts:
+                return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
+
+            merged = pd.concat(zip_parts, ignore_index=True)
+            merged = merged.groupby("code_insee", as_index=False)["qualite_air_score"].median()
+            merged["qualite_air_score"] = merged["qualite_air_score"].round(1)
+
+            console.print(f"[green]✅ ATMO téléchargé national : {len(merged):,} communes[/green]")
+            return merged
+
+        raw = _read_atmo_file(downloaded)
+        normalized = _normalize_atmo_dataframe(raw)
+
+        if not normalized.empty:
+            console.print(f"[green]✅ ATMO téléchargé national : {len(normalized):,} communes[/green]")
+            return normalized
+
+    except Exception as exc:
+        console.print(f"[yellow]⚠️  ATMO national téléchargé mais inexploitable : {exc}[/yellow]")
+
+    return pd.DataFrame(columns=["code_insee", "qualite_air_score"])
 
 
 def load_atmo_air_quality() -> pd.DataFrame:
     """
     Charge la qualité de l'air réelle disponible.
 
-    Ordre :
-    1. cache local/national ATMO déjà préparé ;
-    2. téléchargement automatique data.gouv si possible ;
-    3. fallback réel ATMO Occitanie open data ;
-    4. fallback réel ATMO Occitanie par pages publiques ville ;
-    5. fallback réel Air Breizh par pages publiques ville ;
-    6. sinon la commune reste NULL.
-
     Aucun score n'est estimé par médiane département/région/nationale.
     """
     global _atmo_cache
+
     if _atmo_cache is not None:
         return _atmo_cache
 
     parts: list[pd.DataFrame] = []
 
-    # 1. Caches nationaux/locaux existants.
-    candidates = [
-        CACHE_DIR / "atmo_commune.csv",
-        CACHE_DIR / "atmo_air_quality_commune.csv",
-        CACHE_DIR / "indice_atmo_commune.csv",
-        CACHE_DIR / "atmo_indice_qualite_air_commune.csv",
-    ]
+    national_cache = _load_national_or_local_atmo_cache()
 
-    for p in candidates:
-        if p.exists():
-            df = read_csv_flexible(p)
-            normalized = _normalize_atmo_dataframe(df)
-            if not normalized.empty:
-                console.print(f"[green]✅ ATMO cache national/local : {len(normalized):,} communes[/green]")
-                parts.append(normalized)
-                break
+    if not national_cache.empty:
+        parts.append(national_cache)
+    else:
+        national_download = _load_downloaded_national_atmo()
 
-    # 2. Téléchargement national via data.gouv si aucun cache national n'a marché.
-    if not parts:
-        downloaded = download_data_gouv_csv_resource(
-            "indice qualité air quotidien commune indice atmo",
-            "atmo_indice_qualite_air_commune.csv",
-        )
+        if not national_download.empty:
+            parts.append(national_download)
 
-        if downloaded and downloaded.exists():
-            try:
-                if downloaded.suffix.lower() == ".zip":
-                    zip_parts = []
-                    with zipfile.ZipFile(downloaded) as zf:
-                        for name in zf.namelist():
-                            if name.lower().endswith(".csv"):
-                                raw_path = CACHE_DIR / f"_atmo_extract_{Path(name).name}"
-                                with zf.open(name) as f:
-                                    raw_path.write_bytes(f.read())
-                                part = read_csv_flexible(raw_path)
-                                norm = _normalize_atmo_dataframe(part)
-                                if not norm.empty:
-                                    zip_parts.append(norm)
-                    if zip_parts:
-                        normalized = pd.concat(zip_parts, ignore_index=True)
-                        normalized = normalized.groupby("code_insee", as_index=False)["qualite_air_score"].median()
-                        normalized["qualite_air_score"] = normalized["qualite_air_score"].round(1)
-                        console.print(f"[green]✅ ATMO téléchargé national : {len(normalized):,} communes[/green]")
-                        parts.append(normalized)
-                else:
-                    df = read_csv_flexible(downloaded)
-                    normalized = _normalize_atmo_dataframe(df)
-                    if not normalized.empty:
-                        console.print(f"[green]✅ ATMO téléchargé national : {len(normalized):,} communes[/green]")
-                        parts.append(normalized)
-            except Exception as exc:
-                console.print(f"[yellow]⚠️  ATMO national téléchargé mais inexploitable : {exc}[/yellow]")
-
-    # 3. Fallback réel ATMO Occitanie open data.
     occ_path = _download_atmo_occitanie()
-    if occ_path and occ_path.exists():
+
+    if occ_path is not None and occ_path.exists():
         try:
-            occ_raw = _read_atmo_occitanie_file(occ_path)
+            occ_raw = _read_atmo_file(occ_path)
             occ_norm = _normalize_atmo_occitanie_dataframe(occ_raw)
+
             if not occ_norm.empty:
-                console.print(f"[green]✅ ATMO Occitanie open data : {len(occ_norm):,} villes/territoires rattachés[/green]")
+                console.print(
+                    f"[green]✅ ATMO Occitanie open data : "
+                    f"{len(occ_norm):,} villes/territoires rattachés[/green]"
+                )
                 parts.append(occ_norm)
 
-                if "31555" in set(occ_norm["code_insee"].astype(str).str.zfill(5)):
-                    console.print("[green]✅ ATMO Occitanie open data : Toulouse disponible[/green]")
         except Exception as exc:
             console.print(f"[yellow]⚠️  ATMO Occitanie téléchargé mais inexploitable : {exc}[/yellow]")
 
-    # 4. Fallback réel ATMO Occitanie par pages publiques ville.
     try:
         occ_pages = _load_atmo_occitanie_pages()
+
         if not occ_pages.empty:
             console.print(f"[green]✅ ATMO Occitanie pages ville : {len(occ_pages):,} villes[/green]")
             parts.append(occ_pages)
-            if "31555" in set(occ_pages["code_insee"].astype(str).str.zfill(5)):
-                console.print("[green]✅ ATMO Occitanie page : Toulouse disponible[/green]")
+
     except Exception as exc:
         console.print(f"[yellow]⚠️  ATMO Occitanie pages indisponibles : {exc}[/yellow]")
 
-    # 5. Fallback réel Air Breizh par pages publiques ville.
     try:
         breizh_pages = _load_air_breizh_pages()
+
         if not breizh_pages.empty:
             console.print(f"[green]✅ Air Breizh pages ville : {len(breizh_pages):,} villes[/green]")
             parts.append(breizh_pages)
+
     except Exception as exc:
         console.print(f"[yellow]⚠️  Air Breizh pages indisponibles : {exc}[/yellow]")
 
     merged = _merge_atmo_sources(parts)
+
     if merged.empty:
         console.print("[yellow]⚠️  ATMO communal absent — qualite_air_score restera NULL[/yellow]")
     else:
         console.print(f"[green]✅ ATMO fusionné : {len(merged):,} communes avec qualité de l'air[/green]")
 
     _atmo_cache = merged
+
     return _atmo_cache
 
 
-def extract_qualite_air_score(atmo_df: pd.DataFrame, code_insee: str) -> Optional[float]:
+def extract_qualite_air_score(
+    atmo_df: pd.DataFrame,
+    code_insee: str,
+) -> float | None:
+    """Extrait le score de qualité de l'air d'une commune."""
     if atmo_df.empty:
         return None
 
-    col_code = next((c for c in ["code_insee", "CODGEO", "code_commune", "commune", "code_zone"] if c in atmo_df.columns), None)
-    if not col_code:
+    column_map = _lower_column_map(atmo_df)
+
+    code_col = next(
+        (
+            column_map.get(name)
+            for name in [
+                "code_insee",
+                "codgeo",
+                "code_commune",
+                "commune",
+                "code_zone",
+            ]
+            if column_map.get(name) is not None
+        ),
+        None,
+    )
+
+    if not code_col:
         return None
 
-    rows = atmo_df[atmo_df[col_code].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(5) == str(code_insee).zfill(5)]
+    target_code = _normalize_insee_code(code_insee)
+
+    rows = atmo_df[
+        atmo_df[code_col].map(_normalize_insee_code) == target_code
+    ]
+
     if rows.empty:
         return None
 
-    score_col = next((c for c in atmo_df.columns if c.lower() in {"qualite_air_score", "score_air", "air_score", "score"}), None)
+    score_col = next(
+        (
+            column
+            for column in atmo_df.columns
+            if _strip_accents(column).replace(" ", "_")
+            in {"qualite_air_score", "score_air", "air_score", "score"}
+        ),
+        None,
+    )
+
     if not score_col:
         return None
 
-    vals = rows[score_col].map(to_float).dropna()
-    if vals.empty:
+    values = rows[score_col].map(to_float).dropna()
+
+    if values.empty:
         return None
 
-    return round(max(0, min(10, float(vals.median()))), 1)
+    score = float(values.median())
+
+    return round(max(0.0, min(10.0, score)), 1)

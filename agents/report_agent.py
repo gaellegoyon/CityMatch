@@ -6,6 +6,8 @@ Entrypoint de génération de rapports.
 La logique Markdown/PDF détaillée est dans agents/reporting/core.py.
 """
 
+from __future__ import annotations
+
 from agents.reporting.core import run_report_agent
 
 __all__ = ["run_report_agent"]

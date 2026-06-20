@@ -5,143 +5,183 @@
 La Base Permanente des Équipements, ou BPE, est une source statistique produite par l'INSEE.
 
 Elle recense de nombreux équipements et services accessibles à la population :
-- commerces ;
-- enseignement ;
-- santé ;
-- services aux particuliers ;
-- transports ;
-- sports, loisirs et culture ;
-- tourisme.
 
-CityMatch utilise la BPE pour mesurer la disponibilité de certains services dans les communes.
+* commerces ;
+* enseignement ;
+* santé ;
+* services aux particuliers ;
+* transports ;
+* sports, loisirs et culture ;
+* tourisme.
+
+CityMatch utilise la BPE pour mesurer la disponibilité de certains services dans les communes françaises.
 
 ## Pourquoi utiliser la BPE ?
 
-La BPE est utile car elle permet de comparer les villes sur des équipements concrets :
+La BPE est utile car elle permet de comparer les villes sur des équipements concrets, par exemple :
 
-- crèches ;
-- écoles ;
-- collèges ;
-- lycées ;
-- médecins ;
-- pharmacies ;
-- hôpitaux ;
-- gares ;
-- supermarchés ;
-- restaurants ;
-- équipements sportifs ;
-- bibliothèques ;
-- cinémas.
+* crèches ;
+* écoles ;
+* lycées ;
+* médecins généralistes ;
+* médecins spécialistes ;
+* pharmacies ;
+* gares ;
+* supermarchés ;
+* restaurants.
 
 Ces données sont plus fiables qu'un ressenti ou qu'une note subjective.
 
+CityMatch n'utilise cependant pas tous les équipements présents dans la BPE. Seuls les indicateurs suffisamment fiables, interprétables et intégrés dans la base de données sont utilisés dans le scoring.
+
 ## Utilisation dans CityMatch
 
-CityMatch n'utilise pas tous les types d'équipements BPE. Le système conserve uniquement les équipements utiles au matching résidentiel et suffisamment interprétables.
+CityMatch conserve principalement les équipements utiles au choix résidentiel :
 
-Exemples de champs bruts :
-- nb_creches ;
-- nb_ecoles_primaires ;
-- nb_colleges ;
-- nb_lycees ;
-- nb_medecins_generalistes ;
-- nb_pharmacies ;
-- nb_hopitaux ;
-- nb_gares ;
-- nb_supermarches ;
-- nb_restaurants.
+* nb_creches ;
+* nb_ecoles_primaires ;
+* nb_lycees ;
+* nb_medecins_generalistes ;
+* nb_medecins_specialistes ;
+* nb_pharmacies ;
+* nb_gares ;
+* nb_supermarches ;
+* nb_restaurants.
+
+Ces champs bruts peuvent ensuite être transformés en ratios ou en scores afin de mieux comparer les villes.
 
 ## Pourquoi utiliser des ratios ?
 
 Comparer uniquement le nombre brut d'équipements favorise mécaniquement les grandes villes.
 
 Exemple :
-- une grande ville aura plus de médecins en nombre absolu ;
-- une petite ville peut pourtant avoir une meilleure densité médicale par habitant.
 
-CityMatch privilégie donc des ratios :
+* une grande ville aura souvent plus de médecins en nombre absolu ;
+* une petite ville peut pourtant avoir une meilleure densité médicale par habitant.
 
-- creches_pour_1000 ;
-- medecins_pour_1000 ;
-- medecins_specialistes_pour_1000 ;
-- nb_pharmacies_pour_1000 ;
-- ecoles_pour_1000_enfants ;
-- nb_lycees_pour_1000_ados ;
-- supermarches_pour_1000.
+CityMatch privilégie donc des ratios quand c'est pertinent :
+
+* creches_pour_1000 ;
+* medecins_pour_1000 ;
+* medecins_specialistes_pour_1000 ;
+* nb_pharmacies_pour_1000 ;
+* ecoles_pour_1000_enfants ;
+* nb_lycees_pour_1000_ados ;
+* supermarches_pour_1000.
 
 Ces ratios permettent une comparaison plus juste entre villes de tailles différentes.
 
 ## Santé
 
-Les équipements de santé utilisés peuvent inclure :
+Les équipements de santé utilisés dans CityMatch sont principalement :
 
-- médecins généralistes ;
-- dentistes ;
-- ophtalmologues ;
-- pédiatres ;
-- pharmacies ;
-- hôpitaux ;
-- urgences.
+* médecins généralistes ;
+* médecins spécialistes ;
+* pharmacies.
 
-Pour les profils seniors ou les utilisateurs qui mentionnent la santé, CityMatch donne plus d'importance aux indicateurs médicaux.
+Critères associés :
+
+* medecins_pour_1000 ;
+* medecins_specialistes_pour_1000 ;
+* nb_pharmacies_pour_1000.
+
+Pour les profils seniors ou les utilisateurs qui mentionnent la santé, CityMatch donne plus d'importance aux indicateurs médicaux disponibles.
+
+L'accès aux hôpitaux, urgences ou cliniques peut être mentionné comme une limite ou une perspective, mais il n'est pas utilisé dans le scoring tant qu'un indicateur fiable et homogène n'est pas intégré dans la base CityMatch.
 
 ## Famille et éducation
 
 Pour les familles, CityMatch utilise notamment :
 
-- crèches ;
-- écoles primaires ;
-- collèges ;
-- lycées.
+* crèches ;
+* écoles primaires ;
+* lycées.
+
+Critères associés :
+
+* creches_pour_1000 ;
+* ecoles_pour_1000_enfants ;
+* nb_lycees_pour_1000_ados.
 
 CityMatch évite d'utiliser un score scolaire inventé. Les données réellement utilisées sont liées à l'offre d'équipements éducatifs et non à une promesse de qualité scolaire absolue.
 
+Les collèges peuvent être présents dans certaines sources BPE, mais ils ne doivent pas être présentés comme un critère de scoring actif si aucun indicateur dédié n'est intégré dans CityMatch.
+
 ## Services et vie pratique
 
-La BPE permet aussi de mesurer :
+La BPE permet aussi de mesurer certains services utiles au quotidien :
 
-- supermarchés ;
-- restaurants ;
-- équipements sportifs ;
-- bibliothèques ;
-- cinémas ;
-- gares.
+* supermarchés ;
+* restaurants ;
+* gares.
+
+Critères associés :
+
+* supermarches_pour_1000 ;
+* score_restauration ;
+* transport_score.
 
 Ces critères peuvent être utiles pour des demandes comme :
-- “commodités proches” ;
-- “ville pratique” ;
-- “restaurants et sorties” ;
-- “transports”.
+
+* “commodités proches” ;
+* “ville pratique” ;
+* “restaurants et sorties” ;
+* “transports” ;
+* “gare proche”.
+
+Le score de transport utilisé dans CityMatch reste simple : il repose principalement sur la présence ou la densité de gares issues de la BPE. Il ne remplace pas une vraie analyse des temps de trajet, des lignes de bus, du métro, du tramway ou de la fréquence des trains.
+
+## Culture, sport et loisirs
+
+La BPE contient aussi des équipements liés à la culture, au sport et aux loisirs.
+
+Cependant, CityMatch ne les utilise pas actuellement comme critères principaux de scoring, sauf si des indicateurs dédiés ont été intégrés dans la base.
+
+Cela signifie que les demandes comme :
+
+* “beaucoup de culture” ;
+* “ville sportive” ;
+* “cinémas et musées” ;
+* “loisirs pour enfants” ;
+
+peuvent être comprises par le système, mais doivent être signalées comme des besoins non directement scorés si aucun critère fiable n'est disponible.
 
 ## Limites de la BPE
 
 La BPE indique la présence d'équipements, mais pas toujours :
 
-- leur qualité ;
-- leurs horaires ;
-- leur saturation ;
-- leur accessibilité réelle en transport ;
-- leur distance exacte au logement.
+* leur qualité ;
+* leurs horaires ;
+* leur saturation ;
+* leur accessibilité réelle en transport ;
+* leur distance exacte au logement ;
+* leur disponibilité effective ;
+* leur adéquation avec les besoins précis d'un foyer.
 
 Elle doit donc être interprétée comme un indicateur objectif de disponibilité, pas comme une garantie de qualité.
 
 ## Bonnes pratiques dans CityMatch
 
-Pour éviter les biais :
+Pour éviter les biais, CityMatch applique plusieurs principes :
 
 1. utiliser des ratios plutôt que seulement des volumes bruts ;
-2. ne pas pénaliser abusivement les petites villes ;
-3. interpréter les équipements rares avec prudence ;
-4. croiser la BPE avec d'autres dimensions : sécurité, prix, population, climat, fibre.
+2. ne pas favoriser automatiquement les grandes villes ;
+3. ne pas pénaliser abusivement les petites villes ;
+4. interpréter les équipements rares avec prudence ;
+5. croiser la BPE avec d'autres dimensions : sécurité, prix immobilier, population, climat, fibre et localisation ;
+6. ne pas inventer de score lorsqu'un équipement n'est pas correctement intégré.
 
 ## Résumé
 
 La BPE est une source solide pour mesurer l'offre d'équipements et de services.
 
 Dans CityMatch, elle sert principalement à répondre aux besoins liés à :
-- la famille ;
-- la santé ;
-- les commerces ;
-- les services de proximité ;
-- les transports ;
-- les loisirs.
+
+* la famille ;
+* la santé ;
+* les commerces ;
+* les services de proximité ;
+* les transports ;
+* la vie pratique.
+
+Les équipements non intégrés dans les critères actifs peuvent être mentionnés comme limites ou perspectives, mais ne doivent pas être présentés comme des critères réellement utilisés dans le score final.

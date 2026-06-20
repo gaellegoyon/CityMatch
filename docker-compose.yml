@@ -11,18 +11,27 @@ services:
       - .env
 
     environment:
-      DATABASE_URL: sqlite:///./db/cities.db
-      STREAMLIT_SERVER_PORT: 8501
-      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
-      CITYMATCH_COMMUNE_SEUIL: 20000
-      LOAD_DEMO_DATA: 0
+      DATABASE_URL: "sqlite:///./db/cities.db"
+      STREAMLIT_SERVER_PORT: "8501"
+      STREAMLIT_SERVER_ADDRESS: "0.0.0.0"
+      CITYMATCH_COMMUNE_SEUIL: "20000"
+      LOAD_DEMO_DATA: "0"
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    command:
+      - streamlit
+      - run
+      - ui/app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
 
     ports:
       - "8501:8501"
 
     volumes:
-      # Code monté pour le développement :
-      # les modifications locales sont prises en compte dans le container.
+      # Mode développement :
+      # le code local est monté dans le conteneur.
       - .:/app
 
       # Données persistantes Docker.
@@ -30,9 +39,10 @@ services:
       - citymatch_cache:/app/data/cache
       - citymatch_vectorstore:/app/vectorstore
 
-      # Rapports visibles directement sur ta machine locale.
+      # Rapports visibles directement sur la machine locale.
       - ./reports/output:/app/reports/output
 
+    init: true
     restart: unless-stopped
 
     healthcheck:
@@ -41,6 +51,12 @@ services:
       timeout: 10s
       retries: 3
       start_period: 90s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   citymatch_db:

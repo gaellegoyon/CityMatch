@@ -11,58 +11,46 @@
 
 FROM python:3.11-slim AS builder
 
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-ENV PIP_NO_CACHE_DIR=1
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 # Dépendances de build nécessaires à certaines libs Python.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
     libffi-dev \
     libssl-dev \
-    curl \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m venv "$VIRTUAL_ENV"
-RUN pip install --upgrade pip wheel setuptools
+RUN python -m venv "$VIRTUAL_ENV" \
+    && pip install --upgrade pip wheel setuptools
 
 WORKDIR /build
 
 COPY requirements.txt .
 
-# Torch CPU installé explicitement pour éviter une image GPU inutile.
-RUN pip install \
-    torch==2.3.1 \
-    --index-url https://download.pytorch.org/whl/cpu \
+# Torch CPU est installé explicitement pour éviter une image GPU inutile.
+# Attention : ne pas repinner torch avec une version GPU dans requirements.txt.
+RUN pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu \
     && pip install -r requirements.txt
 
 
 FROM python:3.11-slim AS runtime
 
-LABEL description="CityMatch — Assistant IA pour trouver sa ville idéale"
-LABEL version="1.0.0"
+LABEL org.opencontainers.image.title="CityMatch"
+LABEL org.opencontainers.image.description="CityMatch — Assistant IA pour trouver sa ville idéale"
+LABEL org.opencontainers.image.version="1.0.0"
 
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-
-# Dépendances runtime uniquement.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    libgl1 \
-    libglib2.0-0 \
-    fontconfig \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /opt/venv /opt/venv
-
-WORKDIR /app
-
-# Variables par défaut. Les secrets doivent venir de .env via docker compose.
-ENV PYTHONUNBUFFERED=1 \
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
@@ -78,6 +66,23 @@ ENV PYTHONUNBUFFERED=1 \
     LOG_LEVEL=INFO \
     MAX_CITIES_IN_REPORT=10
 
+# Dépendances runtime uniquement.
+# bash est nécessaire pour docker-entrypoint.sh.
+# curl est nécessaire pour le HEALTHCHECK.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    fontconfig \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+
 # Copier le code après les dépendances pour maximiser le cache Docker.
 COPY . .
 
@@ -86,6 +91,7 @@ RUN mkdir -p \
     db \
     data/cache \
     data/docs \
+    data/pdfs \
     reports/output \
     vectorstore \
     logs \

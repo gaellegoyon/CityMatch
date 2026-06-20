@@ -1,204 +1,261 @@
 """
 agents/database_agent.py
-─────────────────────────
+────────────────────────
 Agent d'accès à la base SQLite.
 
-Ce fichier orchestre uniquement la requête. La construction des filtres SQL
-et les enrichissements de résultats sont dans agents/database/.
+Ce fichier orchestre la requête du DatabaseAgent :
+1. nettoyage des critères utilisateur ;
+2. résolution éventuelle d'une ville de référence depuis la BDD ;
+3. construction du filtre SQL ;
+4. requête des villes candidates ;
+5. fallback progressif si trop peu de résultats ;
+6. post-traitements métier ;
+7. mise à jour de l'état LangGraph et journalisation.
 """
 
-import time
-from sqlalchemy import text
-from db.models import SessionLocal, City, AgentLog
-from graph.state import CityMatchState
-from rich.console import Console
-from agents.common.criteria import VALID_CRITERIA_KEYS, filter_valid_criteria
-from agents.database.filters import build_sql_filter
-from agents.database.enrichers import (
-    apply_reference_city_filter,
-    apply_budget_surface_estimate,
-    add_population_category,
-)
+from __future__ import annotations
 
-console = Console()
+import logging
+import time
+from typing import Any
+
+from agents.common.criteria import filter_valid_criteria
+from agents.database.candidate_postprocessing import (
+    add_population_category,
+    apply_budget_surface_estimate,
+    apply_reference_city_filter,
+)
+from agents.database.fallback import apply_progressive_fallback
+from agents.database.filters import build_sql_filter
+from agents.database.repository import (
+    find_city_coordinates_by_name,
+    query_cities_by_filter,
+    serialize_cities,
+)
+from db.models import AgentLog, SessionLocal
+from graph.state import CityMatchState
+from utils.serialization import to_python
+
+
+logger = logging.getLogger(__name__)
+
+DATABASE_AGENT_NAME = "DatabaseAgent"
+DATABASE_AGENT_ACTION = "query_cities"
+TARGET_MIN_CITIES = 10
+MAX_AGENT_TRACE_ENTRIES = 200
+
+
+def _append_agent_trace(
+    state: CityMatchState,
+    message: str,
+) -> None:
+    """Ajoute une trace courte dans l'état LangGraph."""
+    trace = list(state.get("agent_trace") or [])
+    trace.append(message)
+    state["agent_trace"] = trace[-MAX_AGENT_TRACE_ENTRIES:]
+
+
+def _add_user_note(
+    user_criteria: dict[str, Any],
+    note: str,
+) -> None:
+    """Ajoute une note utilisateur sans doublon."""
+    existing_notes = user_criteria.get("notes", [])
+
+    if isinstance(existing_notes, str):
+        notes = [existing_notes]
+    elif isinstance(existing_notes, list):
+        notes = [str(item) for item in existing_notes if item]
+    else:
+        notes = []
+
+    if note not in notes:
+        notes.append(note)
+
+    user_criteria["notes"] = notes
+
+
+def _clean_user_criteria(
+    user_criteria: dict[str, Any],
+) -> tuple[dict[str, Any], set[str]]:
+    """Filtre les critères LLM pour ne conserver que ceux autorisés."""
+    raw_criteria = user_criteria.get("criteres", {})
+    valid_criteria, ignored_criteria = filter_valid_criteria(raw_criteria)
+
+    cleaned_criteria = {
+        **user_criteria,
+        "criteres": valid_criteria,
+    }
+
+    return cleaned_criteria, ignored_criteria
+
+
+def _resolve_reference_coords(
+    db,
+    user_criteria: dict[str, Any],
+) -> tuple[float, float] | None:
+    """
+    Résout la ville de référence depuis la BDD.
+
+    Si la ville n'est pas trouvée, on ajoute une note pour éviter de faire croire
+    que le filtre géographique a été appliqué.
+    """
+    reference_city = user_criteria.get("ville_reference")
+
+    if not reference_city:
+        return None
+
+    reference_coords = find_city_coordinates_by_name(
+        db=db,
+        city_name=reference_city,
+    )
+
+    if reference_coords is None:
+        note = (
+            f"La ville de référence « {reference_city} » n'a pas été retrouvée "
+            "dans la base de données. Le filtre de proximité n'a donc pas été "
+            "appliqué pour cette recherche."
+        )
+        _add_user_note(user_criteria, note)
+
+        logger.warning(
+            "Ville de référence non résolue dans la BDD : %s",
+            reference_city,
+        )
+
+    return reference_coords
 
 
 def run_database_agent(state: CityMatchState) -> CityMatchState:
     """
-    Nœud LangGraph : Agent de requête base de données.
+    Nœud LangGraph : agent de requête base de données.
 
-    Flux :
-    1. Lit les critères validés depuis l'état
-    2. Construit une requête SQL dynamique de pré-filtrage
-    3. Charge toutes les villes candidates avec leurs indicateurs
-    4. Met à jour l'état avec les données brutes des villes
+    Lit les critères utilisateur depuis l'état, interroge la base SQLite,
+    applique les post-traitements nécessaires et écrit les villes candidates
+    dans ``raw_city_data``.
     """
-    start_time = time.time()
-    console.print("\n[bold cyan]🗄️  DatabaseAgent activé[/bold cyan]")
+    start_time = time.perf_counter()
 
-    user_criteria = state.get("user_criteria", {})
-    if not user_criteria:
-        console.print("[yellow]⚠️  Aucun critère utilisateur. Chargement de toutes les villes.[/yellow]")
-        user_criteria = {}
+    user_criteria = dict(state.get("user_criteria") or {})
+    session_id = str(state.get("session_id") or "unknown")
 
     db = SessionLocal()
+
     log_entry = AgentLog(
-        session_id=state.get("session_id", "unknown"),
-        agent_name="DatabaseAgent",
-        action="query_cities",
-        input_data=user_criteria,
+        session_id=session_id,
+        agent_name=DATABASE_AGENT_NAME,
+        action=DATABASE_AGENT_ACTION,
+        input_data=to_python(user_criteria),
+        success=False,
     )
 
     try:
-        # ── Nettoyage des critères invalides avant filtrage ───────────────────
-        criteres_raw = user_criteria.get("criteres", {})
-        criteres_clean = {k: v for k, v in criteres_raw.items() if k in VALID_CRITERIA_KEYS}
-        if len(criteres_clean) < len(criteres_raw):
-            ignored = set(criteres_raw.keys()) - VALID_CRITERIA_KEYS
-            console.print(f"[yellow]⚠️  Critères LLM ignorés (hors whitelist) : {ignored}[/yellow]")
-        user_criteria_clean = {**user_criteria, "criteres": criteres_clean}
+        user_criteria_clean, ignored_criteria = _clean_user_criteria(user_criteria)
 
-        # ── Construction du filtre SQL ─────────────────────────────────────────
-        where_clause, params = build_sql_filter(user_criteria_clean, user_criteria_clean)
+        if ignored_criteria:
+            logger.warning(
+                "Critères LLM ignorés car hors whitelist : %s",
+                sorted(ignored_criteria),
+            )
 
-        # ── Requête principale ─────────────────────────────────────────────────
-        query = db.query(City).filter(text(where_clause).bindparams(**params))
-        cities = query.all()
+        reference_coords = _resolve_reference_coords(
+            db=db,
+            user_criteria=user_criteria_clean,
+        )
 
-        console.print(f"[green]✅ {len(cities)} villes récupérées depuis la BDD[/green]")
+        # Important : les agents suivants doivent recevoir les critères nettoyés,
+        # pas la sortie brute du LLM.
+        state["user_criteria"] = user_criteria_clean
 
-        # ── Fallback progressif si trop peu de résultats ─────────────────────
-        TARGET_MIN = 10  # minimum de villes pour un scoring pertinent
-        if len(cities) < TARGET_MIN:
-            console.print(f"[yellow]⚠️  {len(cities)} villes — relâchement progressif des filtres...[/yellow]")
+        where_clause, params = build_sql_filter(
+            criteria=user_criteria_clean,
+            user_profile=user_criteria_clean,
+            reference_coords=reference_coords,
+        )
 
-            criteres_fb = user_criteria_clean.get("criteres", {})
-            regions = user_criteria_clean.get("regions_preferees", [])
-            pop_min_orig = user_criteria_clean.get("population_min", 10000)
-            pop_max_orig = user_criteria_clean.get("population_max", 500000)
+        cities = query_cities_by_filter(
+            db=db,
+            where_clause=where_clause,
+            params=params,
+        )
 
-            # Niveaux de relâchement successifs
-            fallback_levels = [
-                # Niveau 1 : élargir distance mer à 50km, garder régions + pop
-                {"max_mer": 50.0, "pop_min": pop_min_orig, "keep_regions": True},
-                # Niveau 2 : élargir distance mer à 80km, pop_min réduit à 10k
-                {"max_mer": 80.0, "pop_min": 10000, "keep_regions": True},
-                # Niveau 3 : supprimer filtre régional, distance mer à 80km
-                {"max_mer": 80.0, "pop_min": 10000, "keep_regions": False},
-            ]
+        pre_fallback_count = len(cities)
 
-            for level_idx, level in enumerate(fallback_levels):
-                fb_conditions = []
-                fb_params = {}
+        cities = apply_progressive_fallback(
+            db=db,
+            current_cities=cities,
+            user_profile=user_criteria_clean,
+            target_min=TARGET_MIN_CITIES,
+        )
 
-                fb_conditions.append("population >= :pop_min AND population <= :pop_max")
-                fb_params["pop_min"] = level["pop_min"]
-                fb_params["pop_max"] = pop_max_orig
+        post_fallback_count = len(cities)
 
-                if criteres_fb.get("distance_mer_km", 0) >= 3:
-                    fb_conditions.append("distance_mer_km IS NOT NULL AND distance_mer_km <= :max_mer")
-                    fb_params["max_mer"] = level["max_mer"]
+        city_dicts = serialize_cities(cities)
 
-                if level["keep_regions"] and regions:
-                    placeholders = ", ".join(f":fb_region_{i}" for i in range(len(regions)))
-                    fb_conditions.append(f"region IN ({placeholders})")
-                    for i, r in enumerate(regions): fb_params[f"fb_region_{i}"] = r
+        city_dicts = apply_reference_city_filter(
+            city_dicts=city_dicts,
+            user_profile=user_criteria_clean,
+            reference_coords=reference_coords,
+        )
 
-                fb_where = " AND ".join(fb_conditions) if fb_conditions else "1=1"
-                fb_cities = db.query(City).filter(text(fb_where).bindparams(**fb_params)).all()
-                console.print(f"[yellow]→ Niveau {level_idx+1} : {len(fb_cities)} villes[/yellow]")
+        city_dicts = apply_budget_surface_estimate(
+            city_dicts=city_dicts,
+            user_profile=user_criteria_clean,
+        )
 
-                if len(fb_cities) >= TARGET_MIN:
-                    cities = fb_cities
-                    break
-            else:
-                # Dernier recours : toutes les villes sans filtre géo
-                if len(cities) < 5:
-                    cities = db.query(City).filter(
-                        text("population >= :p").bindparams(p=10000)
-                    ).limit(50).all()
-                    console.print(f"[yellow]→ Dernier recours : {len(cities)} villes sans filtre géo[/yellow]")
-
-        # ── Sérialisation — conserver les NULL, ne pas les remplacer par 0 ────
-        city_dicts = []
-        for city in cities:
-            d = city.to_dict()
-            # NE PAS remplacer None par 0.0 — le scoring utilise la médiane pour les NULL
-            city_dicts.append(d)
-
-        # Filtre exact de proximité à une ville de référence.
-        # Ajoute distance_reference_km aux résultats sans créer de colonne SQL.
-        city_dicts = apply_reference_city_filter(city_dicts, user_criteria_clean)
-
-        # Budget immobilier : ajoute surface_estimable_m2 aux résultats.
-        city_dicts = apply_budget_surface_estimate(city_dicts, user_criteria_clean)
-
-        # Taille de ville lisible côté UI/rapport.
         city_dicts = add_population_category(city_dicts)
 
         state["raw_city_data"] = city_dicts
 
-        # ── Log ────────────────────────────────────────────────────────────────
-        duration_ms = int((time.time() - start_time) * 1000)
-        log_entry.output_data = {"cities_count": len(city_dicts)}
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        log_entry.output_data = to_python(
+            {
+                "cities_count": len(city_dicts),
+                "pre_fallback_count": pre_fallback_count,
+                "post_fallback_count": post_fallback_count,
+                "ignored_criteria": sorted(ignored_criteria),
+                "reference_city_requested": bool(user_criteria_clean.get("ville_reference")),
+                "reference_city_resolved": reference_coords is not None,
+                "where_clause": where_clause,
+                "params": params,
+            }
+        )
         log_entry.duration_ms = duration_ms
         log_entry.success = True
 
-        trace = state.get("agent_trace", [])
-        trace.append(f"DatabaseAgent: {len(city_dicts)} villes chargées en {duration_ms}ms")
-        state["agent_trace"] = trace
+        _append_agent_trace(
+            state,
+            f"{DATABASE_AGENT_NAME}: {len(city_dicts)} villes chargées en {duration_ms} ms",
+        )
 
-    except Exception as e:
-        console.print(f"[red]❌ Erreur DatabaseAgent : {e}[/red]")
-        state["error"] = str(e)
+    except Exception as exc:
+        db.rollback()
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        logger.exception("Erreur pendant l'exécution du DatabaseAgent")
+
+        state["error"] = f"{DATABASE_AGENT_NAME}: {exc}"
         state["raw_city_data"] = []
+
+        log_entry.duration_ms = duration_ms
         log_entry.success = False
-        log_entry.error_message = str(e)
+        log_entry.error_message = str(exc)
+
+        _append_agent_trace(
+            state,
+            f"{DATABASE_AGENT_NAME}: erreur après {duration_ms} ms",
+        )
 
     finally:
-        db.add(log_entry)
-        db.commit()
-        db.close()
+        try:
+            db.add(log_entry)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Impossible d'enregistrer le log du DatabaseAgent")
+        finally:
+            db.close()
 
     return state
-
-
-
-def get_city_details_by_name(city_name: str) -> dict | None:
-    """
-    Utilitaire : retourne les détails complets d'une ville par son nom.
-    Utilisé par l'interface Streamlit pour l'affichage de détails.
-    """
-    db = SessionLocal()
-    try:
-        city = db.query(City).filter(
-            City.nom.ilike(f"%{city_name}%")
-        ).first()
-        return city.to_dict() if city else None
-    finally:
-        db.close()
-
-
-def get_all_regions() -> list[str]:
-    """Retourne la liste unique de toutes les régions disponibles."""
-    db = SessionLocal()
-    try:
-        regions = db.query(City.region).distinct().all()
-        return sorted([r[0] for r in regions if r[0]])
-    finally:
-        db.close()
-
-
-def get_stats_summary() -> dict:
-    """Retourne des statistiques globales sur la base de données."""
-    db = SessionLocal()
-    try:
-        total = db.query(City).count()
-        regions = db.query(City.region).distinct().count()
-        return {
-            "total_cities": total,
-            "total_regions": regions,
-            "last_updated": "2026",
-        }
-    finally:
-        db.close()
